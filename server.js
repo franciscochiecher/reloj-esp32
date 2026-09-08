@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 10000;
 const DEVICE_TOKEN = process.env.DEVICE_TOKEN || 'CAMBIAR_DEVICE_TOKEN';
+const REGISTRATION_KEY = 'taller';
 
 app.use(express.json({limit:'32kb'}));
 app.use(express.static('public'));
@@ -58,6 +59,8 @@ function requireDevice(req,res,next){
 app.post('/api/register',(req,res)=>{
   const username=String(req.body?.username||'').trim();
   const password=String(req.body?.password||'');
+  const registrationKey=String(req.body?.registrationKey||'');
+  if(registrationKey !== REGISTRATION_KEY)return res.status(403).json({ok:false,error:'Palabra de autorización incorrecta.'});
   if(username.length<3)return res.status(400).json({ok:false,error:'El usuario debe tener al menos 3 caracteres.'});
   if(password.length<4)return res.status(400).json({ok:false,error:'La contraseña debe tener al menos 4 caracteres.'});
   if(!/^[a-zA-Z0-9_.-]+$/.test(username))return res.status(400).json({ok:false,error:'El usuario solo puede usar letras, números, punto, guion y guion bajo.'});
