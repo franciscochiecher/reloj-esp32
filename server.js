@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 10000;
 const DEVICE_TOKEN = process.env.DEVICE_TOKEN || 'CAMBIAR_DEVICE_TOKEN';
+const REGISTRATION_KEY = 'taller';
 
 app.use(express.json({limit:'32kb'}));
 app.use(express.static('public'));
@@ -58,21 +59,38 @@ function requireDevice(req,res,next){
 app.post('/api/register',(req,res)=>{
   const username=String(req.body?.username||'').trim();
   const password=String(req.body?.password||'');
-  if(username.length<3)return res.status(400).json({ok:false,error:'El usuario debe tener al menos 3 caracteres.'});
-  if(password.length<4)return res.status(400).json({ok:false,error:'La contraseña debe tener al menos 4 caracteres.'});
-  if(!/^[a-zA-Z0-9_.-]+$/.test(username))return res.status(400).json({ok:false,error:'El usuario solo puede usar letras, números, punto, guion y guion bajo.'});
-  if(users.has(username.toLowerCase()))return res.status(409).json({ok:false,error:'Ese usuario ya existe.'});
+  const registrationKey=String(req.body?.registrationKey||'');
+
+  if(registrationKey !== REGISTRATION_KEY)
+    return res.status(403).json({ok:false,error:'Palabra de autorización incorrecta.'});
+  if(username.length<3)
+    return res.status(400).json({ok:false,error:'El usuario debe tener al menos 3 caracteres.'});
+  if(password.length<4)
+    return res.status(400).json({ok:false,error:'La contraseña debe tener al menos 4 caracteres.'});
+  if(!/^[a-zA-Z0-9_.-]+$/.test(username))
+    return res.status(400).json({ok:false,error:'El usuario solo puede usar letras, números, punto, guion y guion bajo.'});
+  if(users.has(username.toLowerCase()))
+    return res.status(409).json({ok:false,error:'Ese usuario ya existe.'});
+
   users.set(username.toLowerCase(),{username,password:hashPassword(password)});
-  const token=makeSession(username);
-  res.json({ok:true,token});
+  res.json({ok:true,message:'Cuenta creada. Ahora inicia sesión.'});
 });
 
 app.post('/api/login',(req,res)=>{
   const username=String(req.body?.username||'').trim();
   const password=String(req.body?.password||'');
   const user=users.get(username.toLowerCase());
-  if(!user||!verifyPassword(password,user.password))return res.status(401).json({ok:false,error:'Usuario o contraseña incorrectos.'});
+
+  if(!user||!verifyPassword(password,user.password))
+    return res.status(401).json({ok:false,error:'Usuario o contraseña incorrectos.'});
+
   res.json({ok:true,token:makeSession(user.username)});
+});
+
+app.post('/api/logout',requireWebAuth,(req,res)=>{
+  const token=(req.get('Authorization')||'').replace(/^Bearer\s+/i,'');
+  sessions.delete(token);
+  res.json({ok:true});
 });
 
 app.get('/api/state',requireWebAuth,(req,res)=>{
@@ -110,13 +128,23 @@ app.get('/api/device/poll',requireDevice,(req,res)=>{
 
 app.post('/api/device/state',requireDevice,(req,res)=>{
   const body=req.body||{};
-  state={online:true,lastSeen:Date.now(),hora:String(body.hora||'--:--:--'),
+  state={
+    online:true,lastSeen:Date.now(),hora:String(body.hora||'--:--:--'),
     timer:body.timer||{horas:0,minutos:0,segundos:0,corriendo:false},
-    modo:body.modo==='timer'?'timer':'clock',display:String(body.display||'00:00:00'),
-    wifi:String(body.wifi||''),alarms:Array.isArray(body.alarms)?body.alarms:[]};
+    modo:body.modo==='timer'?'timer':'clock',
+    display:String(body.display||'00:00:00'),
+    wifi:String(body.wifi||''),
+    alarms:Array.isArray(body.alarms)?body.alarms:[]
+  };
   res.json({ok:true});
 });
 
-app.get('/health',(req,res)=>res.json({ok:true,deviceOnline:Date.now()-state.lastSeen<5000,users:users.size}));
+app.get('/health',(req,res)=>res.json({
+  ok:true,
+  deviceOnline:Date.now()-state.lastSeen<5000,
+  users:users.size
+}));
 
-app.listen(PORT,'0.0.0.0',()=>console.log(`Servidor escuchando en ${PORT}`));
+app.listen(PORT,'0.0.0.0',()=>{
+  console.log(`Servidor escuchando en ${PORT}`);
+});
