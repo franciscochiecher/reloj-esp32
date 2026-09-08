@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 10000;
 const DEVICE_TOKEN = process.env.DEVICE_TOKEN || 'CAMBIAR_DEVICE_TOKEN';
-const REGISTRATION_KEY = 'taller';
+const REGISTRATION_KEY = process.env.REGISTRATION_KEY || 'taller';
 
 app.use(express.json({limit:'32kb'}));
 app.use(express.static('public'));
@@ -47,12 +47,14 @@ function requireWebAuth(req,res,next){
   cleanSessions();
   const token=(req.get('Authorization')||'').replace(/^Bearer\s+/i,'');
   const session=sessions.get(token);
-  if(!session || session.expires<Date.now())return res.status(401).json({error:'No autorizado'});
+  if(!session || session.expires<Date.now())
+    return res.status(401).json({error:'No autorizado'});
   next();
 }
 function requireDevice(req,res,next){
   const token=req.get('X-Device-Token')||req.query.token;
-  if(!token||token!==DEVICE_TOKEN)return res.status(401).json({error:'Dispositivo no autorizado'});
+  if(!token||token!==DEVICE_TOKEN)
+    return res.status(401).json({error:'Dispositivo no autorizado'});
   next();
 }
 
