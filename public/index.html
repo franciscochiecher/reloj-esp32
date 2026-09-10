@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 - Control de Reloj</title>
+<style>
+:root{--bg:#050505;--card-bg:#101010;--yellow:#ffd400;--border:#2a2a2a;--text:#f4f4f4;--muted:#aaa;--danger:#ef4444;--green:#22c55e}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#191600 0%,#080808 32%,#050505 75%);color:var(--text);font-family:Arial,Helvetica,sans-serif}
+button,input{font:inherit} button{width:100%;border:1px solid var(--yellow);background:var(--yellow);color:#050505;padding:11px 14px;border-radius:9px;font-weight:700;cursor:pointer;transition:.18s} button:hover{transform:translateY(-1px);filter:brightness(1.08)}
+.btn-outline{background:transparent!important;color:var(--yellow)!important}.btn-danger{background:var(--danger)!important;border-color:var(--danger)!important;color:#fff!important}.btn-small{width:auto;padding:6px 11px;font-size:.82rem}
+input{width:100%;background:#080808;color:#fff;border:1px solid #333;border-radius:9px;padding:11px 12px;outline:none}input:focus{border-color:var(--yellow);box-shadow:0 0 0 2px #ffd40018}
+label{display:block;color:#bbb;font-size:.9rem;margin:9px 0 6px}.hidden{display:none!important}
+#loginScreen{width:min(450px,92%);margin:auto;min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:25px 0}
+.brand{text-align:center;margin-bottom:18px}.brand-icon{width:76px;height:76px;margin:auto auto 12px;border:2px solid var(--yellow);border-radius:22px;display:grid;place-items:center;font-size:2.2rem;box-shadow:0 0 25px #ffd40025}.brand h1{margin:0;color:var(--yellow);font-size:1.7rem}.brand p{color:#888;margin:7px 0 0}
+.auth-card{background:rgba(16,16,16,.96);border:1px solid #333;border-radius:18px;padding:22px;box-shadow:0 18px 50px #000}.tab-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:15px}.tab-btn{background:#111;color:#aaa;border-color:#333}.tab-btn.active{background:var(--yellow);color:#050505;border-color:var(--yellow)}.auth-form h2{text-align:center;margin:5px 0 18px}.auth-note{text-align:center;color:#777;font-size:.78rem;line-height:1.4;margin-top:12px}
+.dashboard-container{width:min(1000px,94%);margin:auto;padding:28px 0 45px}.header{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:20px}.header h1{margin:0;color:var(--yellow);font-size:1.55rem}.header p{margin:5px 0 0;color:#888;font-size:.85rem}.connection{display:flex;align-items:center;gap:8px;background:#0b0b0b;border:1px solid #292929;border-radius:999px;padding:8px 12px;white-space:nowrap;font-size:.82rem}.dot{width:9px;height:9px;border-radius:50%;background:#666}.dot.online{background:var(--green);box-shadow:0 0 9px #22c55e}.dot.offline{background:var(--danger)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{background:linear-gradient(145deg,#121212,#0b0b0b);border:1px solid var(--border);border-radius:16px;padding:20px;box-shadow:0 8px 25px #0007}.card.full{grid-column:1/-1}.card h2{margin:0 0 15px;color:var(--yellow);font-size:1.12rem}
+.clock-display{background:#030303;border:1px solid #272727;border-radius:13px;padding:18px 10px;text-align:center;font-family:"Courier New",monospace;font-size:clamp(2.5rem,8vw,4.5rem);font-weight:700;letter-spacing:4px;color:var(--yellow);text-shadow:0 0 18px #ffd40055;margin-bottom:14px}.mode-badge{display:inline-block;margin-bottom:10px;padding:6px 10px;border-radius:999px;background:#201d00;border:1px solid #5d5100;color:#ffe66b;font-size:.76rem;font-weight:bold}
+.timer-inputs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.timer-buttons{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.item-list{background:#080808;border:1px solid #222;padding:10px;border-radius:8px;display:flex;justify-content:space-between;margin-top:8px;align-items:center;gap:10px}.wifi-box{background:#080808;border:1px solid #222;padding:11px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}.wifi-name{color:var(--yellow);font-weight:bold;word-break:break-word;text-align:right}.info{color:#888;margin:10px 0 0;font-size:.82rem;line-height:1.45}.footer{text-align:center;color:#555;font-size:.75rem;margin-top:20px}
+.modal{display:flex;position:fixed;inset:0;background:rgba(0,0,0,.84);justify-content:center;align-items:center;z-index:1000;backdrop-filter:blur(4px);padding:18px}.modal-card{background:var(--card-bg);padding:25px;border-radius:16px;border:1px solid var(--yellow);max-width:410px;width:100%;text-align:center;box-shadow:0 20px 70px #000}.modal-card h3{color:var(--yellow);margin:0 0 12px}.modal-card p{font-size:.95rem;color:#ccc;margin:0 0 20px;line-height:1.45}.alarm-trigger-card{border:2px solid var(--yellow);animation:pulse 1s infinite alternate}@keyframes pulse{from{box-shadow:0 0 10px #ffd400}to{box-shadow:0 0 25px #ffd400}}
+@media(max-width:720px){.grid{grid-template-columns:1fr}.card.full{grid-column:auto}.header{align-items:flex-start;flex-direction:column}.connection{align-self:flex-start}}@media(max-width:520px){.timer-buttons{grid-template-columns:1fr 1fr}.timer-inputs{grid-template-columns:1fr}.dashboard-container{padding-top:18px}.card{padding:16px}}
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+  <div class="brand"><div class="brand-icon">⏱️</div><h1>ESP32 - Control de Reloj</h1><p>Panel de control remoto</p></div>
+  <div class="auth-card">
+    <div class="tab-buttons">
+      <button id="tabLogin" class="tab-btn active" onclick="switchTab('login')">Iniciar Sesión</button>
+      <button id="tabRegister" class="tab-btn" onclick="switchTab('register')">Crear Usuario</button>
+    </div>
+
+    <div id="formLogin" class="auth-form">
+      <h2>🔑 Acceso Directo</h2>
+      <label>Nombre de Usuario:</label>
+      <input type="text" id="loginUser" placeholder="Tu usuario" autocomplete="username">
+      <label>Contraseña Personal:</label>
+      <input type="password" id="loginPass" placeholder="Tu contraseña" autocomplete="current-password" onkeydown="if(event.key==='Enter')loginOnly()">
+      <button style="margin-top:14px" onclick="loginOnly()">Ingresar</button>
+      <div class="auth-note">Usá el usuario y contraseña que registraste.</div>
+    </div>
+
+    <div id="formRegister" class="auth-form hidden">
+      <h2>📝 Registro Nuevo</h2>
+      <label>Nombre de Usuario Nuevo:</label>
+      <input type="text" id="regUser" placeholder="Escribe un usuario" autocomplete="username">
+      <label>Contraseña Personal Nueva:</label>
+      <input type="password" id="regPass" placeholder="Escribe tu contraseña" autocomplete="new-password">
+      <label>Repetir Contraseña:</label>
+      <input type="password" id="regPass2" placeholder="Repite tu contraseña" autocomplete="new-password">
+      <label>Palabra de Autorización:</label>
+      <input type="password" id="regKey" placeholder="Ingresa la palabra de autorización" autocomplete="off" onkeydown="if(event.key==='Enter')registerOnly()">
+      <button style="margin-top:14px" onclick="registerOnly()">Crear Cuenta</button>
+      <div class="auth-note">La cuenta queda guardada en el servidor remoto.</div>
+    </div>
+  </div>
+</div>
+
+<div id="customModal" class="modal hidden"><div class="modal-card"><h3 id="modalTitle">Notificación</h3><p id="modalMessage">Mensaje</p><button onclick="closeModal()">Aceptar</button></div></div>
+<div id="alarmModal" class="modal hidden"><div class="modal-card alarm-trigger-card"><h3 style="font-size:1.8rem">⏰ ¡ALARMA!</h3><div class="clock-display" id="alarmTime">--:--</div><p>Es hora de la alarma programada.</p><button onclick="closeAlarm()">🔔 DESACTIVAR ALARMA</button></div></div>
+
+<div id="dashboard" class="dashboard-container hidden">
+  <div class="header"><div><h1>⏱️ Control de Reloj ESP32</h1><p>Panel remoto del reloj y temporizador</p></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end"><div class="connection"><span id="statusDot" class="dot"></span><span id="statusText">Desconectado</span></div><button class="btn-outline btn-small" onclick="logout()">🚪 Cerrar sesión</button></div></div>
+  <div class="grid">
+    <div class="card"><h2 id="mainModeTitle">⏱️ Hora del Reloj</h2><span id="modeBadge" class="mode-badge">🕐 MODO RELOJ</span><div class="clock-display" id="clock">--:--:--</div><button class="btn-outline" onclick="syncTimeFromBrowser()">📱 Sincronizar con este celular</button></div>
+    <div class="card"><h2>⚙️ Ajustar Hora del Reloj</h2><label>Selecciona Fecha y Hora exacta:</label><input type="datetime-local" id="manualDateTime"><button style="margin-top:10px" onclick="setManualTime()">Establecer Hora</button><p class="info">La hora se envía al ESP32 y se guarda en el DS3231.</p></div>
+    <div class="card"><h2>📶 Estado de Wi-Fi</h2><div class="wifi-box"><span style="color:#aaa;font-size:.85rem">📶 Conectado a:</span><span id="currentWifi" class="wifi-name">Cargando...</span></div><div class="wifi-box"><span style="color:#aaa;font-size:.85rem">🌐 Estado remoto:</span><span id="remoteState" class="wifi-name">Esperando ESP32...</span></div><p class="info">La configuración Wi-Fi continúa disponible desde la interfaz local del ESP32.</p></div>
+    <div class="card"><h2>⏱️ Cronómetro / Temporizador</h2><span class="mode-badge">⏱️ MODO CRONÓMETRO</span><div class="clock-display" id="timerDisplay">00:00:00</div><label>Tiempo a configurar:</label><div class="timer-inputs"><input type="number" id="timerHours" min="0" max="99" value="0"><input type="number" id="timerMinutes" min="0" max="59" value="5"><input type="number" id="timerSeconds" min="0" max="59" value="0"></div><div class="timer-buttons"><button onclick="timerStart()">▶️ Iniciar</button><button onclick="timerPause()">⏸️ Pausar</button><button onclick="timerReset()">🔄 Reiniciar</button><button class="btn-outline" onclick="setMode('timer')">⏱️ Cronómetro</button></div><div style="margin-top:8px"><button class="btn-outline" onclick="setMode('clock')">🕐 Volver al Modo Reloj</button></div><p class="info">El display físico usa MM.SS cuando queda menos de una hora y HH.MM cuando queda una hora o más.</p></div>
+    <div class="card full"><h2>⏰ Programar Alarmas</h2><div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end"><div><label>Horario:</label><input type="time" id="alarmInput"></div><button style="width:auto" onclick="addAlarm()">Agregar Alarma</button></div><div id="alarmContainer" style="margin-top:10px"></div><p class="info">Las alarmas quedan almacenadas en el ESP32 y se mantienen después de reiniciarlo.</p></div>
+  </div>
+  <div class="footer">ESP32 + DS3231 • Control remoto</div>
+</div>
+
+<script>
+let authToken='',alarms=[],lastTriggered='',polling=null;
+let clockDisplayTimer=null,clockSyncTimer=null;
+let clockMode='clock';
+let clockBaseMs=null,clockBaseLocalMs=null;
+let timerEndMs=null,timerPausedRemaining=0,timerRunning=false;
+let pendingMode=null,pendingModeUntil=0;
+let pendingTimerAction=null,pendingTimerUntil=0;
+
+const $=id=>document.getElementById(id);
+
+function showModal(title,message){$('modalTitle').innerText=title;$('modalMessage').innerText=message;$('customModal').classList.remove('hidden')}
+function closeModal(){$('customModal').classList.add('hidden')}
+function switchTab(tab){
+  const login=tab==='login';
+  $('tabLogin').classList.toggle('active',login);
+  $('tabRegister').classList.toggle('active',!login);
+  $('formLogin').classList.toggle('hidden',!login);
+  $('formRegister').classList.toggle('hidden',login);
+}
+async function publicApi(url,opt={}){
+  opt.headers=Object.assign({'Content-Type':'application/json'},opt.headers||{});
+  return fetch(url,opt);
+}
+async function api(url,opt={}){
+  opt.headers=Object.assign({'Content-Type':'application/json'},opt.headers||{},authToken?{'Authorization':'Bearer '+authToken}:{});
+  const r=await fetch(url,opt);
+  if(r.status===401){logout();throw Error('No autorizado')}
+  if(!r.ok)throw Error(await r.text()||'Error');
+  return r;
+}
+
+async function loginOnly(){
+  const u=$('loginUser').value.trim(),p=$('loginPass').value;
+  if(!u||!p)return showModal('Campos Incompletos','Por favor ingresa tu usuario y contraseña.');
+  try{
+    const r=await publicApi('/api/login',{method:'POST',body:JSON.stringify({username:u,password:p})});
+    const d=await r.json();
+    if(!r.ok||!d.ok)return showModal('Acceso Denegado',d.error||'Usuario o contraseña incorrectos.');
+    authToken=d.token;
+    enterDashboard();
+  }catch(e){showModal('Error','No se pudo conectar con el servidor.')}
+}
+async function registerOnly(){
+  const u=$('regUser').value.trim(),p=$('regPass').value,p2=$('regPass2').value,key=$('regKey').value;
+  if(!u||!p||!p2||!key)return showModal('Campos Incompletos','Debes completar usuario, contraseña y repetición.');
+  if(u.length<3)return showModal('Usuario inválido','El usuario debe tener al menos 3 caracteres.');
+  if(p.length<4)return showModal('Contraseña inválida','La contraseña debe tener al menos 4 caracteres.');
+  if(p!==p2)return showModal('Contraseñas diferentes','Las dos contraseñas no coinciden.');
+  try{
+    const r=await publicApi('/api/register',{method:'POST',body:JSON.stringify({username:u,password:p,registrationKey:key})});
+    const d=await r.json();
+    if(!r.ok||!d.ok)return showModal('No se pudo crear la cuenta',d.error||'Error de registro.');
+    showModal('Cuenta creada','Usuario registrado correctamente. Ahora inicia sesión.');
+    switchTab('login');
+    $('loginUser').value=u;$('loginPass').value='';
+    $('regPass').value='';$('regPass2').value='';$('regKey').value='';
+  }catch(e){showModal('Error','No se pudo conectar con el servidor.')}
+}
+function logout(){
+  authToken='';
+  if(polling)clearInterval(polling);
+  if(clockDisplayTimer)clearInterval(clockDisplayTimer);
+  if(clockSyncTimer)clearInterval(clockSyncTimer);
+  polling=null;clockDisplayTimer=null;clockSyncTimer=null;
+  $('dashboard').classList.add('hidden');$('loginScreen').classList.remove('hidden');switchTab('login');
+}
+function enterDashboard(){
+  $('loginScreen').classList.add('hidden');$('dashboard').classList.remove('hidden');setDateTimeInput();
+  if(polling)clearInterval(polling);
+  if(clockDisplayTimer)clearInterval(clockDisplayTimer);
+  if(clockSyncTimer)clearInterval(clockSyncTimer);
+  loadState();
+  polling=setInterval(loadState,1000);
+  clockDisplayTimer=setInterval(updateDisplay,200);
+  clockSyncTimer=setInterval(syncDisplayState,10000);
+}
+function setDateTimeInput(){const d=new Date(),p=n=>String(n).padStart(2,'0');$('manualDateTime').value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
+
+function formatHMS(total){
+  total=Math.max(0,Math.floor(Number(total)||0));
+  const h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60,p=n=>String(n).padStart(2,'0');
+  return p(h)+':'+p(m)+':'+p(s);
+}
+function parseClock(value){
+  const m=String(value||'').match(/^(\d{1,2}):(\d{2}):(\d{2})/);
+  if(!m)return null;
+  return Number(m[1])*3600+Number(m[2])*60+Number(m[3]);
+}
+function setModeVisual(mode){
+  $('mainModeTitle').innerText=mode==='timer'?'⏱️ Cronómetro / Temporizador':'⏱️ Hora del Reloj';
+  $('modeBadge').innerText=mode==='timer'?'⏱️ MODO CRONÓMETRO':'🕐 MODO RELOJ';
+}
+function getTimerInputs(){
+  const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0));
+  const m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0));
+  const s=Math.max(0,Math.min(59,Number($('timerSeconds').value)||0));
+  return {h,m,s,total:h*3600+m*60+s};
+}
+function setClockBase(hora){
+  const sec=parseClock(hora);if(sec===null)return;
+  const now=new Date();
+  const midnight=new Date(now.getFullYear(),now.getMonth(),now.getDate()).getTime();
+  clockBaseMs=midnight+sec*1000;
+  clockBaseLocalMs=Date.now();
+}
+function setTimerPaused(total){
+  timerEndMs=null;timerRunning=false;timerPausedRemaining=Math.max(0,Math.floor(total));
+  const text=formatHMS(timerPausedRemaining);$('clock').innerText=text;$('timerDisplay').innerText=text;
+}
+function startLocalTimer(total){
+  timerPausedRemaining=Math.max(0,Math.floor(total));
+  timerEndMs=Date.now()+timerPausedRemaining*1000;
+  timerRunning=true;
+  clockMode='timer';setModeVisual('timer');
+  updateDisplay();
+}
+function getLocalRemaining(){
+  if(!timerRunning||timerEndMs===null)return timerPausedRemaining;
+  return Math.max(0,Math.ceil((timerEndMs-Date.now())/1000));
+}
+function updateDisplay(){
+  if(clockMode==='timer'){
+    const remaining=getLocalRemaining();
+    if(timerRunning&&remaining<=0){timerRunning=false;timerEndMs=null;timerPausedRemaining=0;}
+    const text=formatHMS(remaining);
+    $('clock').innerText=text;$('timerDisplay').innerText=text;
+    return;
+  }
+  if(clockBaseMs!==null&&clockBaseLocalMs!==null){
+    const d=new Date(clockBaseMs+(Date.now()-clockBaseLocalMs));
+    const p=n=>String(n).padStart(2,'0');
+    const text=p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+    $('clock').innerText=text;
+  }
+}
+
+async function loadState(){
+  try{
+    const r=await api('/api/state');
+    const s=await r.json();
+    const online=!!s.online;
+    $('statusDot').className='dot '+(online?'online':'offline');
+    $('statusText').innerText=online?'ESP32 conectado':'ESP32 desconectado';
+    $('remoteState').innerText=online?'Online':'Offline';
+    $('currentWifi').innerText=s.wifi||'No disponible';
+
+    // Nunca dejamos que una respuesta atrasada del servidor cambie un modo recién elegido.
+    if(!pendingMode || Date.now()>pendingModeUntil){
+      if(s.modo==='timer' && clockMode!=='timer'){
+        clockMode='timer';setModeVisual('timer');
+      }else if(s.modo!=='timer' && clockMode!=='clock'){
+        clockMode='clock';setModeVisual('clock');
+      }
+    }
+
+    const t=s.timer||{};
+    const serverTotal=(Number(t.horas)||0)*3600+(Number(t.minutos)||0)*60+(Number(t.segundos)||0);
+
+    // Si acabamos de enviar una orden, no pisamos el estado local con una respuesta vieja.
+    if(!pendingTimerAction || Date.now()>pendingTimerUntil){
+      if(clockMode==='timer'){
+        if(t.corriendo){
+          if(!timerRunning){startLocalTimer(serverTotal);}
+          else {
+            const local=getLocalRemaining();
+            // Solo corregimos diferencias grandes; la latencia normal no produce saltos.
+            if(Math.abs(local-serverTotal)>2){startLocalTimer(serverTotal);}
+          }
+        }else{
+          setTimerPaused(serverTotal);
+        }
+      }
+    }
+
+    if(!['timerHours','timerMinutes','timerSeconds'].includes(document.activeElement?.id)){
+      // Mientras el usuario escribe, no tocamos los campos.
+      if(!pendingTimerAction || Date.now()>pendingTimerUntil){
+        $('timerHours').value=t.horas??0;
+        $('timerMinutes').value=t.minutos??0;
+        $('timerSeconds').value=t.segundos??0;
+      }
+    }
+
+    if(clockMode==='clock' && !pendingMode){
+      setClockBase(s.hora);
+      updateDisplay();
+    }
+    if(Array.isArray(s.alarms)){alarms=s.alarms;renderAlarms();checkAlarm(s.hora)}
+  }catch(e){
+    $('statusDot').className='dot offline';$('statusText').innerText='Servidor sin respuesta';$('remoteState').innerText='Sin respuesta';
+  }
+}
+
+async function syncDisplayState(){
+  if(!authToken)return;
+  try{
+    const r=await api('/api/state');
+    const s=await r.json();
+    if(pendingMode && Date.now()<=pendingModeUntil)return;
+    if(s.modo==='timer'){
+      if(clockMode!=='timer'){clockMode='timer';setModeVisual('timer');}
+      if(!pendingTimerAction && s.timer){
+        const t=s.timer,serverTotal=(Number(t.horas)||0)*3600+(Number(t.minutos)||0)*60+(Number(t.segundos)||0);
+        if(t.corriendo&&!timerRunning)startLocalTimer(serverTotal);
+        else if(!t.corriendo&&!timerRunning)setTimerPaused(serverTotal);
+      }
+    }else if(!pendingMode){
+      clockMode='clock';setModeVisual('clock');setClockBase(s.hora);updateDisplay();
+    }
+  }catch(e){}
+}
+
+async function sendCommand(type,args={}){
+  try{
+    await api('/api/command',{method:'POST',body:JSON.stringify({type,args})});
+  }catch(e){showModal('Error','No se pudo enviar el comando al ESP32.')}
+}
+
+function timerStart(){
+  const {h,m,s,total}=getTimerInputs();
+  if(!total)return showModal('Tiempo inválido','Configura al menos un segundo.');
+  pendingTimerAction='start';pendingTimerUntil=Date.now()+2500;
+  pendingMode='timer';pendingModeUntil=Date.now()+2500;
+  startLocalTimer(total);
+  sendCommand('timer_start',{h,m,s});
+}
+function timerPause(){
+  const remaining=getLocalRemaining();
+  pendingTimerAction='pause';pendingTimerUntil=Date.now()+2500;
+  pendingMode='timer';pendingModeUntil=Date.now()+2500;
+  clockMode='timer';setModeVisual('timer');setTimerPaused(remaining);
+  $('timerHours').value=Math.floor(remaining/3600);
+  $('timerMinutes').value=Math.floor((remaining%3600)/60);
+  $('timerSeconds').value=remaining%60;
+  sendCommand('timer_pause');
+}
+function timerReset(){
+  const {h,m,s,total}=getTimerInputs();
+  pendingTimerAction='reset';pendingTimerUntil=Date.now()+2500;
+  pendingMode='timer';pendingModeUntil=Date.now()+2500;
+  clockMode='timer';setModeVisual('timer');setTimerPaused(total);
+  // Restauramos exactamente lo que el usuario configuró.
+  $('timerHours').value=h;$('timerMinutes').value=m;$('timerSeconds').value=s;
+  sendCommand('timer_reset');
+}
+function setMode(mode){
+  mode=mode==='timer'?'timer':'clock';
+  pendingMode=mode;pendingModeUntil=Date.now()+2500;
+  pendingTimerAction=mode==='clock'?'mode_clock':null;
+  pendingTimerUntil=Date.now()+2500;
+  clockMode=mode;setModeVisual(mode);
+  if(mode==='clock'){
+    timerRunning=false;timerEndMs=null;
+    sendCommand('display_mode',{mode:'clock'});
+  }else{
+    sendCommand('display_mode',{mode:'timer'});
+    if(!timerRunning)updateDisplay();
+  }
+}
+function syncTimeFromBrowser(){sendCommand('set_time',{epoch:Math.floor(Date.now()/1000)});}
+function setManualTime(){
+  const v=$('manualDateTime').value;
+  if(!v)return showModal('Hora requerida','Selecciona una fecha y hora.');
+  const epoch=Math.floor(new Date(v).getTime()/1000);
+  if(!Number.isFinite(epoch))return showModal('Error','La fecha no es válida.');
+  sendCommand('set_time',{epoch});
+}
+function addAlarm(){const time=$('alarmInput').value;if(!time)return showModal('Hora requerida','Selecciona un horario para la alarma.');sendCommand('add_alarm',{time});$('alarmInput').value='';setTimeout(loadState,600)}
+function deleteAlarm(id){sendCommand('del_alarm',{id});setTimeout(loadState,600)}
+function renderAlarms(){const c=$('alarmContainer');c.innerHTML='';if(!alarms.length){c.innerHTML='<div class="item-list" style="color:#777;justify-content:center">No hay alarmas programadas.</div>';return}alarms.forEach(a=>{const h=String(a.hora??0).padStart(2,'0'),m=String(a.minuto??0).padStart(2,'0'),d=document.createElement('div');d.className='item-list';d.innerHTML='<span>⏰ '+h+':'+m+' hs</span><button class="btn-small btn-danger">Borrar</button>';d.querySelector('button').onclick=()=>deleteAlarm(a.id);c.appendChild(d)})}
+function checkAlarm(time){if(!time)return;const hm=String(time).slice(0,5),key=String(time).slice(0,16);if(lastTriggered===key)return;if(alarms.some(a=>String(a.hora).padStart(2,'0')+':'+String(a.minuto).padStart(2,'0')===hm&&a.activa!==false)){lastTriggered=key;$('alarmTime').innerText=hm;$('alarmModal').classList.remove('hidden')}}
+function closeAlarm(){$('alarmModal').classList.add('hidden')}
+
+function restoreSession(){
+  authToken='';
+  if(polling)clearInterval(polling);
+  if(clockDisplayTimer)clearInterval(clockDisplayTimer);
+  if(clockSyncTimer)clearInterval(clockSyncTimer);
+  $('dashboard').classList.add('hidden');$('loginScreen').classList.remove('hidden');
+  $('loginUser').value='';$('loginPass').value='';
+}
+restoreSession();
+</script>
+</body>
+</html>
