@@ -8,13 +8,13 @@
 :root{--bg:#050505;--card-bg:#101010;--yellow:#ffd400;--border:#2a2a2a;--text:#f4f4f4;--muted:#aaa;--danger:#ef4444;--green:#22c55e}
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#191600 0%,#080808 32%,#050505 75%);color:var(--text);font-family:Arial,Helvetica,sans-serif}
-button,input{font:inherit} button{width:100%;border:1px solid var(--yellow);background:var(--yellow);color:#050505;padding:11px 14px;border-radius:9px;font-weight:700;cursor:pointer;transition:.18s} button:hover{transform:translateY(-1px);filter:brightness(1.08)}
+button,input{font:inherit} button{width:100%;border:1px solid var(--yellow);background:var(--yellow);color:#050505;padding:11px 14px;border-radius:99px;font-weight:700;cursor:pointer;transition:.18s} button:hover{transform:translateY(-1px);filter:brightness(1.08)}
 .btn-outline{background:transparent!important;color:var(--yellow)!important}.btn-danger{background:var(--danger)!important;border-color:var(--danger)!important;color:#fff!important}.btn-small{width:auto;padding:6px 11px;font-size:.82rem}
 input{width:100%;background:#080808;color:#fff;border:1px solid #333;border-radius:9px;padding:11px 12px;outline:none}input:focus{border-color:var(--yellow);box-shadow:0 0 0 2px #ffd40018}
 label{display:block;color:#bbb;font-size:.9rem;margin:9px 0 6px}.hidden{display:none!important}
 #loginScreen{width:min(450px,92%);margin:auto;min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:25px 0}
 .brand{text-align:center;margin-bottom:18px}.brand-icon{width:76px;height:76px;margin:auto auto 12px;border:2px solid var(--yellow);border-radius:22px;display:grid;place-items:center;font-size:2.2rem;box-shadow:0 0 25px #ffd40025}.brand h1{margin:0;color:var(--yellow);font-size:1.7rem}.brand p{color:#888;margin:7px 0 0}
-.auth-card{background:rgba(16,16,16,.96);border:1px solid #333;border-radius:18px;padding:22px;box-shadow:0 18px 50px #000}.tab-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:15px}.tab-btn{background:#111;color:#aaa;border-color:#333}.tab-btn.active{background:var(--yellow);color:#050505;border-color:var(--yellow)}.auth-form h2{text-align:center;margin:5px 0 18px}.auth-note{text-align:center;color:#777;font-size:.78rem;line-height:1.4;margin-top:12px}
+.auth-card{background:rgba(16,16,16,.96);border:1px solid #333;border-radius:18px;padding:22px;box-shadow:0 18px 50px #000}.tab-buttons{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:15px}.tab-btn{background:#111;color:#aaa;border-color:#333;border-radius:9px}.tab-btn.active{background:var(--yellow);color:#050505;border-color:var(--yellow)}.auth-form h2{text-align:center;margin:5px 0 18px}.auth-note{text-align:center;color:#777;font-size:.78rem;line-height:1.4;margin-top:12px}
 .dashboard-container{width:min(1000px,94%);margin:auto;padding:28px 0 45px}.header{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:20px}.header h1{margin:0;color:var(--yellow);font-size:1.55rem}.header p{margin:5px 0 0;color:#888;font-size:.85rem}.connection{display:flex;align-items:center;gap:8px;background:#0b0b0b;border:1px solid #292929;border-radius:999px;padding:8px 12px;white-space:nowrap;font-size:.82rem}.dot{width:9px;height:9px;border-radius:50%;background:#666}.dot.online{background:var(--green);box-shadow:0 0 9px #22c55e}.dot.offline{background:var(--danger)}
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.card{background:linear-gradient(145deg,#121212,#0b0b0b);border:1px solid var(--border);border-radius:16px;padding:20px;box-shadow:0 8px 25px #0007}.card.full{grid-column:1/-1}.card h2{margin:0 0 15px;color:var(--yellow);font-size:1.12rem}
 .clock-display{background:#030303;border:1px solid #272727;border-radius:13px;padding:18px 10px;text-align:center;font-family:"Courier New",monospace;font-size:clamp(2.5rem,8vw,4.5rem);font-weight:700;letter-spacing:4px;color:var(--yellow);text-shadow:0 0 18px #ffd40055;margin-bottom:14px}.mode-badge{display:inline-block;margin-bottom:10px;padding:6px 10px;border-radius:999px;background:#201d00;border:1px solid #5d5100;color:#ffe66b;font-size:.76rem;font-weight:bold}
@@ -81,12 +81,124 @@ let clockBaseMs=null,clockBaseServerMs=null,clockMode='clock',clockTimerEndMs=nu
 let timerRunning=false;
 let modeLockUntil=0;
 
+const $ = id => document.getElementById(id);
+
+// --- Funciones del Modal y UI ---
+function showModal(title, message) {
+  $('modalTitle').innerText = title;
+  $('modalMessage').innerText = message;
+  $('customModal').classList.remove('hidden');
+}
+
+function closeModal() {
+  $('customModal').classList.add('hidden');
+}
+
+function switchTab(tab) {
+  if (tab === 'login') {
+    $('tabLogin').classList.add('active');
+    $('tabRegister').classList.remove('active');
+    $('formLogin').classList.remove('hidden');
+    $('formRegister').classList.add('hidden');
+  } else {
+    $('tabRegister').classList.add('active');
+    $('tabLogin').classList.remove('active');
+    $('formRegister').classList.remove('hidden');
+    $('formLogin').classList.add('hidden');
+  }
+}
+
+// --- Peticiones HTTP Centralizadas ---
+async function api(endpoint, options = {}) {
+  options.headers = options.headers || {};
+  if (authToken) {
+    options.headers['Authorization'] = 'Bearer ' + authToken;
+  }
+  if (options.body && typeof options.body === 'string' && !options.headers['Content-Type']) {
+    options.headers['Content-Type'] = 'application/json';
+  }
+  const response = await fetch(endpoint, options);
+  if (response.status === 401) {
+    logout();
+    throw new Error('Sesión expirada');
+  }
+  return response;
+}
+
+// --- Autenticación ---
+async function loginOnly() {
+  const u = $('loginUser').value.trim();
+  const p = $('loginPass').value;
+  if (!u || !p) return showModal('Atención', 'Por favor, ingresa usuario y contraseña.');
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: u, pass: p })
+    });
+    const data = await res.json();
+    if (res.ok && data.token) {
+      authToken = data.token;
+      $('loginScreen').classList.add('hidden');
+      $('dashboard').classList.remove('hidden');
+      loadState();
+      polling = setInterval(loadState, 3000);
+      clockDisplayTimer = setInterval(updateClockDisplay, 1000);
+    } else {
+      showModal('Error de acceso', data.message || 'Usuario o contraseña incorrectos.');
+    }
+  } catch (err) {
+    showModal('Error de conexión', 'No se pudo conectar con el servidor.');
+  }
+}
+
+async function registerOnly() {
+  const u = $('regUser').value.trim();
+  const p1 = $('regPass').value;
+  const p2 = $('regPass2').value;
+  const k = $('regKey').value;
+
+  if (!u || !p1 || !p2 || !k) return showModal('Campos incompletos', 'Por favor llena todos los campos.');
+  if (p1 !== p2) return showModal('Error', 'Las contraseñas no coinciden.');
+
+  try {
+    const res = await fetch('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: u, pass: p1, key: k })
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showModal('¡Éxito!', 'Cuenta creada correctamente. Ahora puedes iniciar sesión.');
+      switchTab('login');
+      $('loginUser').value = u;
+      $('loginPass').value = '';
+    } else {
+      showModal('Error', data.message || 'No se pudo crear la cuenta.');
+    }
+  } catch (err) {
+    showModal('Error de conexión', 'No se pudo registrar la cuenta.');
+  }
+}
+
+function logout() {
+  authToken = '';
+  if (polling) clearInterval(polling);
+  if (clockDisplayTimer) clearInterval(clockDisplayTimer);
+  $('dashboard').classList.add('hidden');
+  $('loginScreen').classList.remove('hidden');
+  $('loginUser').value = '';
+  $('loginPass').value = '';
+}
+
+// --- Operaciones del Reloj / Timer / Alarmas ---
 function parseClockToSeconds(value){const m=String(value||'').match(/(\d{1,2}):(\d{2}):(\d{2})/);if(!m)return null;return Number(m[1])*3600+Number(m[2])*60+Number(m[3])}
 function formatHMS(total){total=Math.max(0,Math.floor(total));const h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60,p=n=>String(n).padStart(2,'0');return p(h)+':'+p(m)+':'+p(s)}
 function setClockBaseFromHora(hora){const sec=parseClockToSeconds(hora);if(sec===null)return;const now=new Date();const start=new Date(now.getFullYear(),now.getMonth(),now.getDate());clockBaseMs=start.getTime()+sec*1000;clockBaseServerMs=Date.now()}
 function getTimerTotalFromInputs(){const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0));const m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0));const s=Math.max(0,Math.min(59,Number($('timerSeconds').value)||0));return h*3600+m*60+s}
-function setTimerBaseFromRemaining(timer){const total=(Number(timer?.horas)||0)*3600+(Number(timer?.minutos)||0)*60+(Number(timer?.segundos)||0);clockTimerEndMs=timer?.corriendo ? Date.now()+total*1000 : null;timerRunning=!!timer?.corriendo;return total}
 function setTimerEndFromTotal(total){clockTimerEndMs=Date.now()+total*1000;timerRunning=true}
+
 function updateClockDisplay(){
   if(clockMode==='timer'){
     let remaining=0;
@@ -96,7 +208,6 @@ function updateClockDisplay(){
     }else if(clockTimerEndMs!==null){
       remaining=Math.max(0,Math.ceil((clockTimerEndMs-Date.now())/1000));
     }else{
-      // Cuando está pausado/reiniciado, el valor visible lo mantiene loadState.
       return;
     }
     $('clock').innerText=formatHMS(remaining);
@@ -105,6 +216,7 @@ function updateClockDisplay(){
   }
   if(clockMode==='clock'&&clockBaseMs!==null){const d=new Date(clockBaseMs+(Date.now()-clockBaseServerMs)),p=n=>String(n).padStart(2,'0');$('clock').innerText=p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
 }
+
 async function syncClockFromServer(){
   if(!authToken)return;
   try{
@@ -113,11 +225,11 @@ async function syncClockFromServer(){
     applyServerState(s,true);
   }catch(e){}
 }
+
 function setModeVisual(mode){$('mainModeTitle').innerText=mode==='timer'?'⏱️ Cronómetro / Temporizador':'⏱️ Hora del Reloj';$('modeBadge').innerText=mode==='timer'?'⏱️ MODO CRONÓMETRO':'🕐 MODO RELOJ'}
+
 function applyServerState(s,forceMode=false){
   const serverMode=s.modo==='timer'?'timer':'clock';
-  // Después de cambiar de modo, ignoramos por un momento una respuesta vieja
-  // del servidor para que el primer clic no sea deshecho.
   if(forceMode || Date.now()>=modeLockUntil){
     clockMode=serverMode;
     setModeVisual(serverMode);
@@ -126,9 +238,6 @@ function applyServerState(s,forceMode=false){
   if(clockMode==='timer'){
     const t=s.timer||{};
     const remaining=(Number(t.horas)||0)*3600+(Number(t.minutos)||0)*60+(Number(t.segundos)||0);
-    // Solo tomamos el estado del servidor como nueva base si realmente cambió
-    // el estado (iniciar/pausar/reiniciar). Nunca arrancamos una cuenta porque
-    // simplemente llegó una consulta periódica.
     if(t.corriendo){
       if(!timerRunning || clockTimerEndMs===null || forceMode) setTimerEndFromTotal(remaining);
       else {
@@ -151,6 +260,7 @@ function applyServerState(s,forceMode=false){
     updateClockDisplay();
   }
 }
+
 async function loadState(){
   try{
     const s=await(await api('/api/state')).json(),online=!!s.online;
@@ -160,9 +270,15 @@ async function loadState(){
     $('currentWifi').innerText=s.wifi||'No disponible';
     applyServerState(s,false);
     if(Array.isArray(s.alarms)){alarms=s.alarms;renderAlarms();checkAlarm(s.hora)}
-  }catch(e){$('statusDot').className='dot offline';$('statusText').innerText='Servidor sin respuesta';$('remoteState').innerText='Sin respuesta'}
+  }catch(e){
+    $('statusDot').className='dot offline';
+    $('statusText').innerText='Servidor sin respuesta';
+    $('remoteState').innerText='Sin respuesta';
+  }
 }
+
 async function sendCommand(type,args={}){try{await api('/api/command',{method:'POST',body:JSON.stringify({type,args})});setTimeout(loadState,900)}catch(e){showModal('Error','No se pudo enviar el comando al ESP32.')}}
+
 function timerStart(){
   const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0));
   const m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0));
@@ -174,30 +290,31 @@ function timerStart(){
   sendCommand('timer_start',{h,m,s});
   setTimeout(syncClockFromServer,1800);
 }
+
 function timerPause(){
-  // Pausamos visualmente ya mismo con el tiempo que queda; el ESP32 confirma después.
   if(clockTimerEndMs!==null&&timerRunning){const remaining=Math.max(0,Math.ceil((clockTimerEndMs-Date.now())/1000));clockTimerEndMs=null;timerRunning=false;$('clock').innerText=formatHMS(remaining);$('timerDisplay').innerText=formatHMS(remaining)}
   setModeVisual('timer');clockMode='timer';modeLockUntil=Date.now()+1800;
   sendCommand('timer_pause');
   setTimeout(syncClockFromServer,1800);
 }
+
 function timerReset(){
   const total=getTimerTotalFromInputs();
   setModeVisual('timer');clockMode='timer';modeLockUntil=Date.now()+1800;
-  // Reiniciar significa volver al valor configurado y quedar detenido.
   clockTimerEndMs=null;timerRunning=false;
   $('clock').innerText=formatHMS(total);$('timerDisplay').innerText=formatHMS(total);
   sendCommand('timer_reset');
   setTimeout(syncClockFromServer,1800);
 }
+
 function setMode(mode){
   mode=mode==='timer'?'timer':'clock';
-  // Cambio inmediato en la interfaz, sin necesitar un segundo clic.
   clockMode=mode;modeLockUntil=Date.now()+1800;setModeVisual(mode);
   if(mode==='clock'){clockTimerEndMs=null;timerRunning=false;}
   sendCommand('display_mode',{mode});
   setTimeout(syncClockFromServer,1800);
 }
+
 function syncTimeFromBrowser(){sendCommand('set_time',{epoch:Math.floor(Date.now()/1000)})}
 function setManualTime(){const v=$('manualDateTime').value;if(!v)return showModal('Hora requerida','Selecciona una fecha y hora.');const epoch=Math.floor(new Date(v).getTime()/1000);if(!Number.isFinite(epoch))return showModal('Error','La fecha no es válida.');sendCommand('set_time',{epoch})}
 function addAlarm(){const time=$('alarmInput').value;if(!time)return showModal('Hora requerida','Selecciona un horario para la alarma.');sendCommand('add_alarm',{time});$('alarmInput').value='';setTimeout(loadState,400)}
@@ -205,16 +322,9 @@ function deleteAlarm(id){sendCommand('del_alarm',{id});setTimeout(loadState,400)
 function renderAlarms(){const c=$('alarmContainer');c.innerHTML='';if(!alarms.length){c.innerHTML='<div class="item-list" style="color:#777;justify-content:center">No hay alarmas programadas.</div>';return}alarms.forEach(a=>{const h=String(a.hora??0).padStart(2,'0'),m=String(a.minuto??0).padStart(2,'0'),d=document.createElement('div');d.className='item-list';d.innerHTML='<span>⏰ '+h+':'+m+' hs</span><button class="btn-small btn-danger">Borrar</button>';d.querySelector('button').onclick=()=>deleteAlarm(a.id);c.appendChild(d)})}
 function checkAlarm(time){if(!time)return;const hm=String(time).slice(0,5),key=String(time).slice(0,16);if(lastTriggered===key)return;if(alarms.some(a=>String(a.hora).padStart(2,'0')+':'+String(a.minuto).padStart(2,'0')===hm&&a.activa!==false)){lastTriggered=key;$('alarmTime').innerText=hm;$('alarmModal').classList.remove('hidden')}}
 function closeAlarm(){$('alarmModal').classList.add('hidden')}
-// Seguridad: nunca se restaura una sesión guardada.
-function restoreSession(){
-  authToken='';
-  if(polling) clearInterval(polling);
-  $('dashboard').classList.add('hidden');
-  $('loginScreen').classList.remove('hidden');
-  $('loginUser').value='';
-  $('loginPass').value='';
-}
-restoreSession();
+
+// Inicialización limpia
+logout();
 </script>
 </body>
 </html>
