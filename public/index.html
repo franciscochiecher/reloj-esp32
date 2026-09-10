@@ -116,18 +116,106 @@ async function registerOnly(){
   }catch(e){showModal('Error','No se pudo conectar con el servidor.')}
 }
 function logout(){authToken='';if(polling)clearInterval(polling);if(clockSyncTimer)clearInterval(clockSyncTimer);if(clockDisplayTimer)clearInterval(clockDisplayTimer);polling=null;clockSyncTimer=null;clockDisplayTimer=null;clockBaseMs=null;clockBaseServerMs=null;clockTimerEndMs=null;$('dashboard').classList.add('hidden');$('loginScreen').classList.remove('hidden');switchTab('login')}
-function enterDashboard(){$('loginScreen').classList.add('hidden');$('dashboard').classList.remove('hidden');setDateTimeInput();loadState();if(polling)clearInterval(polling);polling=setInterval(loadState,5000);if(clockSyncTimer)clearInterval(clockSyncTimer);clockSyncTimer=setInterval(syncClockFromServer,10000);if(clockDisplayTimer)clearInterval(clockDisplayTimer);clockDisplayTimer=setInterval(updateClockDisplay,250)}
+function enterDashboard(){$('loginScreen').classList.add('hidden');$('dashboard').classList.remove('hidden');setDateTimeInput();loadState();if(polling)clearInterval(polling);polling=setInterval(loadState,5000);if(clockSyncTimer)clearInterval(clockSyncTimer);clockSyncTimer=setInterval(async()=>{if(clockMode==='clock') await syncClockFromServer()},10000);if(clockDisplayTimer)clearInterval(clockDisplayTimer);clockDisplayTimer=setInterval(updateClockDisplay,250)}
 function setDateTimeInput(){const d=new Date(),p=n=>String(n).padStart(2,'0');$('manualDateTime').value=d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())}
 function parseClockToSeconds(value){const m=String(value||'').match(/(\d{1,2}):(\d{2}):(\d{2})/);if(!m)return null;return Number(m[1])*3600+Number(m[2])*60+Number(m[3])}
 function formatHMS(total){total=Math.max(0,Math.floor(total));const h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60,p=n=>String(n).padStart(2,'0');return p(h)+':'+p(m)+':'+p(s)}
 function setClockBaseFromHora(hora){const sec=parseClockToSeconds(hora);if(sec===null)return;const now=new Date();const start=new Date(now.getFullYear(),now.getMonth(),now.getDate());clockBaseMs=start.getTime()+sec*1000;clockBaseServerMs=Date.now()}
-function setTimerBase(timer){const total=(Number(timer?.horas)||0)*3600+(Number(timer?.minutos)||0)*60+(Number(timer?.segundos)||0);clockTimerEndMs=Date.now()+total*1000}
+function setTimerBase(timer){const total=(Number(timer?.horas)||0)*3600+(Number(timer?.minutos)||0)*60+(Number(timer?.segundos)||0);clockTimerEndMs=Date.now()+total*1000;}
 function updateClockDisplay(){if(clockMode==='timer'&&clockTimerEndMs!==null){const remaining=Math.max(0,Math.ceil((clockTimerEndMs-Date.now())/1000));$('clock').innerText=formatHMS(remaining);$('timerDisplay').innerText=formatHMS(remaining);return}if(clockMode==='clock'&&clockBaseMs!==null){const d=new Date(clockBaseMs+(Date.now()-clockBaseServerMs)),p=n=>String(n).padStart(2,'0');$('clock').innerText=p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}}
-async function syncClockFromServer(){if(!authToken)return;try{const s=await(await api('/api/state')).json();if(s.modo==='timer'){clockMode='timer';setTimerBase(s.timer||{});$('mainModeTitle').innerText='⏱️ Cronómetro / Temporizador';$('modeBadge').innerText='⏱️ MODO CRONÓMETRO'}else{clockMode='clock';setClockBaseFromHora(s.hora);$('mainModeTitle').innerText='⏱️ Hora del Reloj';$('modeBadge').innerText='🕐 MODO RELOJ'}updateClockDisplay()}catch(e){}}
-async function loadState(){try{const s=await(await api('/api/state')).json(),online=!!s.online;$('statusDot').className='dot '+(online?'online':'offline');$('statusText').innerText=online?'ESP32 conectado':'ESP32 desconectado';$('remoteState').innerText=online?'Online':'Offline';$('currentWifi').innerText=s.wifi||'No disponible';if(s.modo==='timer'){clockMode='timer';setTimerBase(s.timer||{});$('mainModeTitle').innerText='⏱️ Cronómetro / Temporizador';$('modeBadge').innerText='⏱️ MODO CRONÓMETRO'}else{clockMode='clock';setClockBaseFromHora(s.hora);$('mainModeTitle').innerText='⏱️ Hora del Reloj';$('modeBadge').innerText='🕐 MODO RELOJ'}updateClockDisplay();const t=s.timer||{};$('timerDisplay').innerText=String(t.horas||0).padStart(2,'0')+':'+String(t.minutos||0).padStart(2,'0')+':'+String(t.segundos||0).padStart(2,'0');if(!['timerHours','timerMinutes','timerSeconds'].includes(document.activeElement?.id)){$('timerHours').value=t.horas||0;$('timerMinutes').value=t.minutos||0;$('timerSeconds').value=t.segundos||0}if(Array.isArray(s.alarms)){alarms=s.alarms;renderAlarms();checkAlarm(s.hora)}}catch(e){$('statusDot').className='dot offline';$('statusText').innerText='Servidor sin respuesta';$('remoteState').innerText='Sin respuesta'}}
+async function syncClockFromServer(){
+  if(!authToken)return;
+  try{
+    const s=await(await api('/api/state')).json();
+    if(s.modo==='timer'){
+      clockMode='timer';
+      setTimerBase(s.timer||{});
+      $('mainModeTitle').innerText='⏱️ Cronómetro / Temporizador';
+      $('modeBadge').innerText='⏱️ MODO CRONÓMETRO';
+    }else{
+      clockMode='clock';
+      clockTimerEndMs=null;
+      setClockBaseFromHora(s.hora);
+      $('mainModeTitle').innerText='⏱️ Hora del Reloj';
+      $('modeBadge').innerText='🕐 MODO RELOJ';
+    }
+    updateClockDisplay();
+  }catch(e){}
+}
+
+async function loadState(){
+  try{
+    const s=await(await api('/api/state')).json(),online=!!s.online;
+    $('statusDot').className='dot '+(online?'online':'offline');
+    $('statusText').innerText=online?'ESP32 conectado':'ESP32 desconectado';
+    $('remoteState').innerText=online?'Online':'Offline';
+    $('currentWifi').innerText=s.wifi||'No disponible';
+
+    if(s.modo==='timer'){
+      // Solo sincronizamos el temporizador si todavía no tenemos una base,
+      // o si el estado recibido indica una pausa/reinicio. No lo reiniciamos
+      // cada 5 segundos porque eso produce saltos en la cuenta regresiva.
+      clockMode='timer';
+      $('mainModeTitle').innerText='⏱️ Cronómetro / Temporizador';
+      $('modeBadge').innerText='⏱️ MODO CRONÓMETRO';
+      if(clockTimerEndMs===null) setTimerBase(s.timer||{});
+      updateClockDisplay();
+    }else{
+      clockMode='clock';
+      clockTimerEndMs=null;
+      $('mainModeTitle').innerText='⏱️ Hora del Reloj';
+      $('modeBadge').innerText='🕐 MODO RELOJ';
+      // En modo reloj sí se puede resincronizar desde el servidor.
+      setClockBaseFromHora(s.hora);
+      updateClockDisplay();
+    }
+
+    const t=s.timer||{};
+    // Los campos de configuración muestran el valor recibido del ESP32,
+    // pero no pisan la cuenta visual del cronómetro mientras está corriendo.
+    if(!['timerHours','timerMinutes','timerSeconds'].includes(document.activeElement?.id)){
+      $('timerHours').value=t.horas||0;
+      $('timerMinutes').value=t.minutos||0;
+      $('timerSeconds').value=t.segundos||0;
+    }
+    if(Array.isArray(s.alarms)){alarms=s.alarms;renderAlarms();checkAlarm(s.hora)}
+  }catch(e){
+    $('statusDot').className='dot offline';
+    $('statusText').innerText='Servidor sin respuesta';
+    $('remoteState').innerText='Sin respuesta';
+  }
+}
 async function sendCommand(type,args={}){try{await api('/api/command',{method:'POST',body:JSON.stringify({type,args})});setTimeout(loadState,150)}catch(e){showModal('Error','No se pudo enviar el comando al ESP32.')}}
-function timerStart(){const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0)),m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0)),s=Math.max(0,Math.min(59,Number($('timerSeconds').value)||0));if(!h&&!m&&!s)return showModal('Tiempo inválido','Configura al menos un segundo.');sendCommand('timer_start',{h,m,s});setModeVisual('timer');clockMode='timer';setTimeout(syncClockFromServer,300)}
-function timerPause(){sendCommand('timer_pause');setModeVisual('timer');setTimeout(syncClockFromServer,300)}function timerReset(){sendCommand('timer_reset');setModeVisual('timer');setTimeout(syncClockFromServer,300)}
+function timerStart(){
+  const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0));
+  const m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0));
+  const s=Math.max(0,Math.min(59,Number($('timerSeconds').value)||0));
+  if(!h&&!m&&!s)return showModal('Tiempo inválido','Configura al menos un segundo.');
+  setModeVisual('timer');
+  clockMode='timer';
+  // Arranque visual inmediato; luego se corrige con el estado real del ESP32.
+  setTimerBase({horas:h,minutos:m,segundos:s});
+  updateClockDisplay();
+  sendCommand('timer_start',{h,m,s});
+  setTimeout(syncClockFromServer,1400);
+}
+function timerPause(){
+  sendCommand('timer_pause');
+  setModeVisual('timer');
+  setTimeout(syncClockFromServer,1400);
+}
+function timerReset(){
+  const h=Math.max(0,Math.min(99,Number($('timerHours').value)||0));
+  const m=Math.max(0,Math.min(59,Number($('timerMinutes').value)||0));
+  const s=Math.max(0,Math.min(59,Number($('timerSeconds').value)||0));
+  sendCommand('timer_reset');
+  setModeVisual('timer');
+  clockMode='timer';
+  setTimerBase({horas:h,minutos:m,segundos:s});
+  updateClockDisplay();
+  setTimeout(syncClockFromServer,1400);
+}
+
 function setMode(mode){sendCommand('display_mode',{mode});setModeVisual(mode);if(mode==='clock'){clockMode='clock';clockTimerEndMs=null;setTimeout(syncClockFromServer,300)}else{clockMode='timer';setTimeout(syncClockFromServer,300)}}function setModeVisual(mode){$('mainModeTitle').innerText=mode==='timer'?'⏱️ Cronómetro / Temporizador':'⏱️ Hora del Reloj';$('modeBadge').innerText=mode==='timer'?'⏱️ MODO CRONÓMETRO':'🕐 MODO RELOJ'}
 function syncTimeFromBrowser(){sendCommand('set_time',{epoch:Math.floor(Date.now()/1000)})}
 function setManualTime(){const v=$('manualDateTime').value;if(!v)return showModal('Hora requerida','Selecciona una fecha y hora.');const epoch=Math.floor(new Date(v).getTime()/1000);if(!Number.isFinite(epoch))return showModal('Error','La fecha no es válida.');sendCommand('set_time',{epoch})}
