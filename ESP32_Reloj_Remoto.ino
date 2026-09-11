@@ -14,6 +14,10 @@ ESP32Time rtc;
 RTC_DS3231 ds3231;
 WiFiServer server(80);
 
+// Timer de Hardware para Multiplexación fluida (Compatible con ESP32 Core v3.x)
+hw_timer_t *timerDisplay = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
 // ==========================================
 // SEGMENTOS
 // ==========================================
@@ -35,10 +39,8 @@ const int dig3 = 32;
 
 // ==========================================
 // TABLA DE NÚMEROS (0-9)
-// HIGH = ENCENDIDO, LOW = APAGADO
 // ==========================================
 const byte numeros[10][7] = {
-  // A, B, C, D, E, F, G
   {1, 1, 1, 1, 1, 1, 0}, // 0
   {0, 1, 1, 0, 0, 0, 0}, // 1
   {1, 1, 0, 1, 1, 0, 1}, // 2
@@ -51,10 +53,9 @@ const byte numeros[10][7] = {
   {1, 1, 1, 1, 0, 1, 1}  // 9
 };
 
-// Variables para el refresco por multiplexión (Barrido no bloqueante)
-byte digitosBuff[4] = {0, 0, 0, 0};
-byte digitoActualIndex = 0;
-unsigned long ultimoRefrescoMultiplexion = 0;
+// Variables globales protegidas para la interrupción
+volatile byte digitosBuff[4] = {0, 0, 0, 0};
+volatile byte digitoActualIndex = 0;
 
 void apagarDigitos() {
   digitalWrite(dig0, LOW);
@@ -84,26 +85,32 @@ void ponerNumero(byte numero) {
   digitalWrite(segG, numeros[numero][6]);
 }
 
-void mostrarDigito(byte numero, byte digito) {
+// Rutina de Interrupción por Hardware (Corregida para eliminar ghosting/brillo tenue)
+void IRAM_ATTR onTimerDisplay() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  
+  // 1. Apagar inmediatamente todos los dígitos para cortar corriente
   apagarDigitos();
+  
+  // 2. Apagar todos los segmentos para limpiar líneas residuales
   apagarSegmentos();
-  delayMicroseconds(50); // Evitar sombras fantasma en multiplexión
 
-  ponerNumero(numero);
+  // 3. Pequeña pausa para asegurar la descarga de capacitancia residual
+  ets_delay_us(2);
 
-  if (digito == 0) digitalWrite(dig0, HIGH);
-  if (digito == 1) digitalWrite(dig1, HIGH);
-  if (digito == 2) digitalWrite(dig2, HIGH);
-  if (digito == 3) digitalWrite(dig3, HIGH);
-}
+  // 4. Cargar el nuevo número en los segmentos
+  ponerNumero(digitosBuff[digitoActualIndex]);
 
-// Barrido de multiplexión rápido en el loop
-void multiplexarDisplay() {
-  if (micros() - ultimoRefrescoMultiplexion >= 2000) { // Refresca cada 2 ms
-    ultimoRefrescoMultiplexion = micros();
-    mostrarDigito(digitosBuff[digitoActualIndex], digitoActualIndex);
-    digitoActualIndex = (digitoActualIndex + 1) % 4;
-  }
+  // 5. Encender únicamente el dígito actual
+  if (digitoActualIndex == 0) digitalWrite(dig0, HIGH);
+  else if (digitoActualIndex == 1) digitalWrite(dig1, HIGH);
+  else if (digitoActualIndex == 2) digitalWrite(dig2, HIGH);
+  else if (digitoActualIndex == 3) digitalWrite(dig3, HIGH);
+
+  // 6. Avanzar al siguiente dígito
+  digitoActualIndex = (digitoActualIndex + 1) % 4;
+
+  portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 long gmtOffset_sec = -10800; // UTC-3 (Argentina)
@@ -118,16 +125,9 @@ struct Alarma {
 std::vector<Alarma> listaAlarmas;
 int proximoId = 1;
 
-// ============================================================
-// GUARDADO PERMANENTE DE ALARMAS EN LA MEMORIA NVS DEL ESP32
-// ============================================================
 void guardarAlarmas() {
   Preferences alarmPrefs;
-
-  if (!alarmPrefs.begin("alarmas", false)) {
-    Serial.println("ERROR: No se pudo abrir NVS para guardar alarmas.");
-    return;
-  }
+  if (!alarmPrefs.begin("alarmas", false)) return;
 
   const uint32_t cantidad = (uint32_t)listaAlarmas.size();
   alarmPrefs.putUInt("count", cantidad);
@@ -135,26 +135,17 @@ void guardarAlarmas() {
 
   if (cantidad > 0) {
     size_t bytes = cantidad * sizeof(Alarma);
-    size_t escritos = alarmPrefs.putBytes("data", listaAlarmas.data(), bytes);
-    if (escritos != bytes) {
-      Serial.printf("ERROR: solo se guardaron %u de %u bytes.\n",
-                    (unsigned)escritos, (unsigned)bytes);
-    }
+    alarmPrefs.putBytes("data", listaAlarmas.data(), bytes);
   } else {
     alarmPrefs.remove("data");
   }
 
   alarmPrefs.end();
-  Serial.printf("Alarmas guardadas en NVS: %u\n", (unsigned)cantidad);
 }
 
 void cargarAlarmas() {
   Preferences alarmPrefs;
-
-  if (!alarmPrefs.begin("alarmas", false)) {
-    Serial.println("ERROR: No se pudo abrir/crear NVS para cargar alarmas.");
-    return;
-  }
+  if (!alarmPrefs.begin("alarmas", false)) return;
 
   listaAlarmas.clear();
   uint32_t cantidad = alarmPrefs.getUInt("count", 0);
@@ -167,11 +158,7 @@ void cargarAlarmas() {
 
   if (cantidad > 0 && disponible >= esperado) {
     listaAlarmas.resize(cantidad);
-    size_t leidos = alarmPrefs.getBytes("data", listaAlarmas.data(), esperado);
-    if (leidos != esperado) {
-      listaAlarmas.clear();
-      Serial.println("ERROR: datos de alarmas incompletos. Se inicia sin alarmas.");
-    }
+    alarmPrefs.getBytes("data", listaAlarmas.data(), esperado);
   }
 
   alarmPrefs.end();
@@ -182,23 +169,14 @@ void cargarAlarmas() {
   }
   if (proximoId <= mayorId) proximoId = mayorId + 1;
   if (proximoId < 1) proximoId = 1;
-
-  Serial.printf("Alarmas cargadas desde NVS: %u\n",
-                (unsigned)listaAlarmas.size());
 }
 
-// ============================================================
-// CRONOMETRO / TEMPORIZADOR
-// ============================================================
 uint32_t timerTotalSegundos = 0;
 uint32_t timerRestantesSegundos = 0;
 bool timerCorriendo = false;
 unsigned long timerUltimoTick = 0;
 bool modoCronometro = false;
 
-// ============================================================
-// ACCESO REMOTO POR INTERNET
-// ============================================================
 const char* REMOTE_SERVER_URL = "https://reloj-esp32.onrender.com/api/device";
 const char* DEVICE_TOKEN = "Franchula2017";
 unsigned long ultimoPollRemoto = 0;
@@ -220,7 +198,6 @@ void ejecutarComandoRemoto(const String &linea) {
   if (linea.length() == 0 || linea == "NO_COMMANDS") return;
 
   String tipo = campoComando(linea, 0);
-  Serial.println("Comando remoto: " + linea);
 
   if (tipo == "timer_start") {
     int h = constrain(campoComando(linea, 1).toInt(), 0, 99);
@@ -233,7 +210,6 @@ void ejecutarComandoRemoto(const String &linea) {
       timerUltimoTick = millis();
       timerCorriendo = true;
       modoCronometro = true;
-      Serial.printf("Cronometro remoto iniciado: %02d:%02d:%02d\n", h, m, sec);
     }
   }
   else if (tipo == "timer_pause") {
@@ -248,29 +224,19 @@ void ejecutarComandoRemoto(const String &linea) {
   }
   else if (tipo == "display_mode") {
     String modo = campoComando(linea, 1);
-    if (modo == "timer") {
-      modoCronometro = true;
-    } else {
-      modoCronometro = false;
-      timerCorriendo = false;
-    }
+    modoCronometro = (modo == "timer");
+    if (!modoCronometro) timerCorriendo = false;
   }
   else if (tipo == "set_time") {
     unsigned long epoch = strtoul(campoComando(linea, 1).c_str(), nullptr, 10);
     unsigned long horaLocal = epoch + gmtOffset_sec;
     rtc.setTime(horaLocal);
     ds3231.adjust(DateTime(horaLocal));
-    Serial.println("Hora ajustada remotamente.");
   }
   else if (tipo == "add_alarm") {
     String timeStr = campoComando(linea, 1);
     if (timeStr.length() >= 5) {
-      Alarma nueva = {
-        proximoId++,
-        timeStr.substring(0, 2).toInt(),
-        timeStr.substring(3, 5).toInt(),
-        true
-      };
+      Alarma nueva = { proximoId++, timeStr.substring(0, 2).toInt(), timeStr.substring(3, 5).toInt(), true };
       listaAlarmas.push_back(nueva);
       guardarAlarmas();
     }
@@ -304,13 +270,11 @@ void enviarEstadoRemoto() {
   uint32_t mm = (restante % 3600UL) / 60UL;
   uint32_t ss = restante % 60UL;
   char timerText[16];
-  snprintf(timerText, sizeof(timerText), "%02lu:%02lu:%02lu",
-           (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+  snprintf(timerText, sizeof(timerText), "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
 
   DateTime ahora = ds3231.now();
   char horaText[16];
-  snprintf(horaText, sizeof(horaText), "%02d:%02d:%02d",
-           ahora.hour(), ahora.minute(), ahora.second());
+  snprintf(horaText, sizeof(horaText), "%02d:%02d:%02d", ahora.hour(), ahora.minute(), ahora.second());
 
   String json = "{\"hora\":\"" + String(horaText) +
                 "\",\"timer\":{" +
@@ -330,8 +294,7 @@ void enviarEstadoRemoto() {
   }
   json += "]}";
 
-  int code = http.POST(json);
-  if (code < 0) Serial.printf("Error enviando estado remoto: %d\n", code);
+  http.POST(json);
   http.end();
 }
 
@@ -392,7 +355,6 @@ void actualizarTimer() {
     if (transcurrido >= timerRestantesSegundos) {
       timerRestantesSegundos = 0;
       timerCorriendo = false;
-      Serial.println("Cronometro finalizado.");
     } else {
       timerRestantesSegundos -= transcurrido;
     }
@@ -402,6 +364,8 @@ void actualizarTimer() {
 void actualizarBufferDisplay() {
   actualizarTimer();
 
+  byte tempBuff[4];
+
   if (modoCronometro) {
     uint32_t restante = obtenerTimerRestante();
     uint32_t horas = restante / 3600UL;
@@ -410,30 +374,35 @@ void actualizarBufferDisplay() {
 
     if (horas > 0) {
       if (horas > 99) horas = 99;
-      digitosBuff[0] = (byte)(horas / 10);
-      digitosBuff[1] = (byte)(horas % 10);
-      digitosBuff[2] = (byte)(minutos / 10);
-      digitosBuff[3] = (byte)(minutos % 10);
+      tempBuff[0] = (byte)(horas / 10);
+      tempBuff[1] = (byte)(horas % 10);
+      tempBuff[2] = (byte)(minutos / 10);
+      tempBuff[3] = (byte)(minutos % 10);
     } else {
-      digitosBuff[0] = (byte)(minutos / 10);
-      digitosBuff[1] = (byte)(minutos % 10);
-      digitosBuff[2] = (byte)(segundos / 10);
-      digitosBuff[3] = (byte)(segundos % 10);
+      tempBuff[0] = (byte)(minutos / 10);
+      tempBuff[1] = (byte)(minutos % 10);
+      tempBuff[2] = (byte)(segundos / 10);
+      tempBuff[3] = (byte)(segundos % 10);
     }
-    return;
+  } else {
+    DateTime ahora = ds3231.now();
+    int h = ahora.hour();
+    int m = ahora.minute();
+
+    tempBuff[0] = (byte)(h / 10);
+    tempBuff[1] = (byte)(h % 10);
+    tempBuff[2] = (byte)(m / 10);
+    tempBuff[3] = (byte)(m % 10);
   }
 
-  DateTime ahora = ds3231.now();
-  int h = ahora.hour();
-  int m = ahora.minute();
-
-  digitosBuff[0] = (byte)(h / 10);
-  digitosBuff[1] = (byte)(h % 10);
-  digitosBuff[2] = (byte)(m / 10);
-  digitosBuff[3] = (byte)(m % 10);
+  portENTER_CRITICAL(&timerMux);
+  digitosBuff[0] = tempBuff[0];
+  digitosBuff[1] = tempBuff[1];
+  digitosBuff[2] = tempBuff[2];
+  digitosBuff[3] = tempBuff[3];
+  portEXIT_CRITICAL(&timerMux);
 }
 
-// Decodificación de caracteres especiales en URL
 String urlDecode(String input) {
   String decoded = "";
   char c;
@@ -519,7 +488,6 @@ String getNetworkJSON() {
   return json;
 }
 
-// Interfaz HTML principal
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="es">
@@ -527,244 +495,43 @@ const char index_html[] PROGMEM = R"rawliteral(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ESP32 - Control de Reloj</title>
-
     <style>
-        :root {
-            --bg-color: #000000;
-            --card-bg: #111111;
-            --yellow-main: #facc15;
-            --yellow-hover: #eab308;
-            --text-color: #ffffff;
-            --border-color: #222222;
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            padding: 20px;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-
-        #loginScreen {
-            width: 100%;
-            max-width: 400px;
-            background: var(--card-bg);
-            padding: 30px;
-            border-radius: 16px;
-            border: 1px solid var(--border-color);
-            margin-top: 50px;
-        }
-
-        .tab-buttons {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-        }
-
-        .tab-btn {
-            flex: 1;
-            padding: 10px;
-            background: transparent;
-            border: 1px solid var(--border-color);
-            color: #aaa;
-            border-radius: 8px;
-            font-weight: bold;
-            cursor: pointer;
-            text-transform: none;
-        }
-
-        .tab-btn.active {
-            background-color: var(--yellow-main);
-            color: #000;
-            border-color: var(--yellow-main);
-        }
-
-        .dashboard-container {
-            width: 100%;
-            max-width: 1200px;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-
-        .card {
-            background-color: var(--card-bg);
-            padding: 24px;
-            border-radius: 16px;
-            border: 1px solid var(--border-color);
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-        }
-
-        h2 {
-            color: var(--yellow-main);
-            font-size: 1.1rem;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-            margin-bottom: 15px;
-            text-transform: uppercase;
-        }
-
-        .clock-display {
-            font-size: 3rem;
-            font-weight: 800;
-            text-align: center;
-            color: var(--yellow-main);
-            font-family: monospace;
-            margin: 15px 0;
-        }
-
-        .form-group {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-
-        label {
-            font-size: 0.85rem;
-            color: #aaa;
-        }
-
-        input, select {
-            padding: 12px;
-            border-radius: 8px;
-            border: 1px solid #333;
-            background-color: #050505;
-            color: #fff;
-            width: 100%;
-            color-scheme: dark;
-        }
-
-        button {
-            padding: 12px;
-            border: none;
-            border-radius: 8px;
-            background-color: var(--yellow-main);
-            color: #000;
-            font-weight: bold;
-            cursor: pointer;
-            text-transform: uppercase;
-            margin-top: 5px;
-        }
-
-        button:hover {
-            background-color: var(--yellow-hover);
-        }
-
-        .btn-outline {
-            background: transparent;
-            border: 1px solid var(--yellow-main);
-            color: var(--yellow-main);
-        }
-
-        .btn-danger {
-            background-color: #ef4444 !important;
-            color: #ffffff !important;
-        }
-
-        .btn-danger:hover {
-            background-color: #dc2626 !important;
-        }
-
-        .item-list {
-            background: #080808;
-            border: 1px solid #222;
-            padding: 10px;
-            border-radius: 8px;
-            display: flex;
-            justify-content: space-between;
-            margin-top: 8px;
-            align-items: center;
-        }
-
-        .btn-small {
-            padding: 5px 10px;
-            width: auto;
-            font-size: 0.8rem;
-        }
-
-        .modal {
-            display: flex;
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.85);
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
-            backdrop-filter: blur(4px);
-        }
-
-        .modal-card {
-            background: var(--card-bg);
-            padding: 25px;
-            border-radius: 16px;
-            border: 1px solid var(--yellow-main);
-            max-width: 400px;
-            width: 90%;
-            text-align: center;
-        }
-
-        .modal-card h3 {
-            color: var(--yellow-main);
-            margin-bottom: 12px;
-            font-size: 1.2rem;
-        }
-
-        .modal-card p {
-            font-size: 0.95rem;
-            color: #ccc;
-            margin-bottom: 20px;
-            line-height: 1.4;
-        }
-
-        .alarm-trigger-card {
-            border: 2px solid var(--yellow-main);
-            animation: pulse-border 1s infinite alternate;
-        }
-
-        @keyframes pulse-border {
-            from {
-                border-color: var(--yellow-main);
-                box-shadow: 0 0 10px var(--yellow-main);
-            }
-
-            to {
-                border-color: #ffffff;
-                box-shadow: 0 0 25px var(--yellow-main);
-            }
-        }
-
-        .hidden {
-            display: none !important;
-        }
+        :root { --bg-color: #000000; --card-bg: #111111; --yellow-main: #facc15; --yellow-hover: #eab308; --text-color: #ffffff; --border-color: #222222; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background-color: var(--bg-color); color: var(--text-color); padding: 20px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
+        #loginScreen { width: 100%; max-width: 400px; background: var(--card-bg); padding: 30px; border-radius: 16px; border: 1px solid var(--border-color); margin-top: 50px; }
+        .tab-buttons { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+        .tab-btn { flex: 1; padding: 10px; background: transparent; border: 1px solid var(--border-color); color: #aaa; border-radius: 8px; font-weight: bold; cursor: pointer; text-transform: none; }
+        .tab-btn.active { background-color: var(--yellow-main); color: #000; border-color: var(--yellow-main); }
+        .dashboard-container { width: 100%; max-width: 1200px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; margin-top: 20px; }
+        .card { background-color: var(--card-bg); padding: 24px; border-radius: 16px; border: 1px solid var(--border-color); display: flex; flex-direction: column; justify-content: space-between; }
+        h2 { color: var(--yellow-main); font-size: 1.1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; margin-bottom: 15px; text-transform: uppercase; }
+        .clock-display { font-size: 3rem; font-weight: 800; text-align: center; color: var(--yellow-main); font-family: monospace; margin: 15px 0; }
+        .form-group { display: flex; flex-direction: column; gap: 10px; }
+        label { font-size: 0.85rem; color: #aaa; }
+        input, select { padding: 12px; border-radius: 8px; border: 1px solid #333; background-color: #050505; color: #fff; width: 100%; color-scheme: dark; }
+        button { padding: 12px; border: none; border-radius: 8px; background-color: var(--yellow-main); color: #000; font-weight: bold; cursor: pointer; text-transform: uppercase; margin-top: 5px; }
+        button:hover { background-color: var(--yellow-hover); }
+        .btn-outline { background: transparent; border: 1px solid var(--yellow-main); color: var(--yellow-main); }
+        .btn-danger { background-color: #ef4444 !important; color: #ffffff !important; }
+        .btn-danger:hover { background-color: #dc2626 !important; }
+        .item-list { background: #080808; border: 1px solid #222; padding: 10px; border-radius: 8px; display: flex; justify-content: space-between; margin-top: 8px; align-items: center; }
+        .btn-small { padding: 5px 10px; width: auto; font-size: 0.8rem; }
+        .modal { display: flex; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(4px); }
+        .modal-card { background: var(--card-bg); padding: 25px; border-radius: 16px; border: 1px solid var(--yellow-main); max-width: 400px; width: 90%; text-align: center; }
+        .modal-card h3 { color: var(--yellow-main); margin-bottom: 12px; font-size: 1.2rem; }
+        .modal-card p { font-size: 0.95rem; color: #ccc; margin-bottom: 20px; line-height: 1.4; }
+        .alarm-trigger-card { border: 2px solid var(--yellow-main); animation: pulse-border 1s infinite alternate; }
+        @keyframes pulse-border { from { border-color: var(--yellow-main); box-shadow: 0 0 10px var(--yellow-main); } to { border-color: #ffffff; box-shadow: 0 0 25px var(--yellow-main); } }
+        .hidden { display: none !important; }
     </style>
 </head>
-
 <body>
-
 <div id="loginScreen">
     <div class="tab-buttons">
         <button id="tabLogin" class="tab-btn active" onclick="switchTab('login')">Iniciar Sesión</button>
         <button id="tabRegister" class="tab-btn" onclick="switchTab('register')">Crear Usuario</button>
     </div>
-
     <div id="formLogin" class="form-group">
         <h2>🔑 Acceso Directo</h2>
         <label>Nombre de Usuario:</label>
@@ -773,7 +540,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         <input type="password" id="loginPass" placeholder="Tu contraseña">
         <button onclick="loginOnly()">Ingresar</button>
     </div>
-
     <div id="formRegister" class="form-group hidden">
         <h2>📝 Registro Nuevo</h2>
         <label>Palabra Clave (Requerida):</label>
@@ -826,7 +592,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 </div>
 
 <div id="dashboard" class="dashboard-container hidden">
-
     <div class="card">
         <h2 id="mainModeTitle">⏱️ Hora del Reloj</h2>
         <div id="mainModeBadge" style="text-align:center; color:#aaa; font-size:.85rem; margin-top:-5px;">🕐 MODO RELOJ</div>
@@ -880,9 +645,6 @@ const char index_html[] PROGMEM = R"rawliteral(
             <button class="btn-outline" onclick="setDisplayMode('clock')">🕐 Modo Reloj</button>
             <button class="btn-outline" onclick="setDisplayMode('timer')">⏱️ Modo Cronómetro</button>
         </div>
-        <p style="color:#aaa; margin-top:10px; font-size:.85rem;">
-            El reloj físico mostrará el modo elegido. En cronómetro: MM:SS; si queda una hora o más, HH:MM.
-        </p>
     </div>
 
     <div class="card">
@@ -893,7 +655,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         </div>
         <div id="alarmContainer" style="max-height: 150px; overflow-y: auto; margin-top: 10px;"></div>
     </div>
-
 </div>
 
 <script>
@@ -902,7 +663,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     let confirmCallback = null;
     let activeAlarms = [];
     let lastTriggeredMinute = "";
-    let timerPoll = null;
 
     function switchTab(tab) {
         if(tab === 'login') {
@@ -943,11 +703,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     document.getElementById('modalBtnConfirm').onclick = function() {
         const pass = document.getElementById('modalSecretInput').value;
-        if (confirmCallback) {
-            confirmCallback(pass);
-        } else {
-            closeNotification();
-        }
+        if (confirmCallback) confirmCallback(pass);
+        else closeNotification();
     };
 
     function loginOnly() {
@@ -967,8 +724,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             } else {
                 showNotification("Acceso Denegado", "Usuario o contraseña incorrectos.");
             }
-        })
-        .catch(() => showNotification("Error", "No se pudo conectar con el ESP32."));
+        });
     }
 
     function registerOnly() {
@@ -986,13 +742,8 @@ const char index_html[] PROGMEM = R"rawliteral(
             if(resText.trim() === "OK") {
                 document.getElementById('loginScreen').classList.add('hidden');
                 document.getElementById('countryModal').classList.remove('hidden');
-            } else if(resText.trim() === "WRONG_KEY") {
-                showNotification("Palabra Clave Incorrecta", "La palabra clave introducida es errónea.");
-            } else {
-                showNotification("Usuario Existente", "Ese usuario ya existe con otra contraseña.");
-            }
-        })
-        .catch(() => showNotification("Error", "No se pudo conectar con el ESP32."));
+            } else showNotification("Error", resText);
+        });
     }
 
     function confirmCountry() {
@@ -1003,7 +754,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             document.getElementById('dashboard').classList.remove('hidden');
             syncWithDevice();
             setInterval(getESPTime, 1000);
-            timerPoll = setInterval(loadTimer, 1000);
+            setInterval(loadTimer, 1000);
             loadAlarms();
             loadTimer();
             loadNetworks();
@@ -1029,18 +780,15 @@ const char index_html[] PROGMEM = R"rawliteral(
                             checkAlarmTrigger(t);
                         }
                     });
-            })
-            .catch(() => {});
+            });
     }
 
     function loadCurrentWifi() {
         fetch('/get-current-network', { headers: { 'Authorization': authHeader } })
         .then(res => res.text())
         .then(ssid => {
-            const wifiElement = document.getElementById('currentWifi');
-            wifiElement.innerText = (ssid && ssid.trim() !== '') ? ssid.trim() : 'Sin conexión Wi-Fi';
-        })
-        .catch(() => { document.getElementById('currentWifi').innerText = 'No disponible'; });
+            document.getElementById('currentWifi').innerText = (ssid && ssid.trim() !== '') ? ssid.trim() : 'Sin conexión Wi-Fi';
+        });
     }
 
     function checkAlarmTrigger(currentTimeStr) {
@@ -1066,14 +814,9 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     function setManualTime() {
         const val = document.getElementById('manualDateTime').value;
-        if (!val) return showNotification("Fecha Inválida", "Selecciona una fecha y hora válidas.");
-
+        if (!val) return;
         const epoch = Math.floor(new Date(val).getTime() / 1000);
-        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } })
-        .then(() => {
-            showNotification("✅ Hora Ajustada", "La hora del ESP32 se actualizó con éxito.");
-            getESPTime();
-        });
+        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } }).then(() => getESPTime());
     }
 
     function loadNetworks() {
@@ -1082,10 +825,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         .then(networks => {
             const c = document.getElementById('wifiContainer');
             c.innerHTML = '';
-            if(networks.length === 0) {
-                c.innerHTML = '<p style="color:#666; font-size:0.85rem;">No hay redes guardadas.</p>';
-                return;
-            }
             networks.forEach(net => {
                 c.innerHTML += `
                     <div class="item-list">
@@ -1102,83 +841,45 @@ const char index_html[] PROGMEM = R"rawliteral(
     function requestAddWifi() {
         const s = document.getElementById('wifiSSID').value;
         const p = document.getElementById('wifiPASS').value;
-        if(!s || !p) return showNotification("Campos Incompletos", "Por favor ingresa SSID y Contraseña.");
-
-        showAuthDialog("🔒 Verificación Requerida", "Ingresa tu contraseña personal para guardar la nueva red:", (pass) => {
+        if(!s || !p) return;
+        showAuthDialog("🔒 Verificación", "Ingresa tu contraseña para guardar red:", (pass) => {
             if(pass === userPassword) {
                 fetch(`/add-wifi?ssid=${encodeURIComponent(s)}&pass=${encodeURIComponent(p)}`, { headers: { 'Authorization': authHeader } })
-                .then(() => {
-                    closeNotification();
-                    document.getElementById('wifiSSID').value = '';
-                    document.getElementById('wifiPASS').value = '';
-                    loadNetworks();
-                    showNotification("✅ Red Guardada", "La red Wi-Fi fue agregada correctamente.");
-                });
-            } else {
-                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
+                .then(() => { closeNotification(); loadNetworks(); });
             }
         });
     }
 
     function requestConnectWifi(id) {
-        showAuthDialog("🔒 Autorizar Cambio de Red", "Ingresa tu contraseña personal para conectar a esta red:", (pass) => {
+        showAuthDialog("🔒 Autorizar", "Ingresa contraseña para conectar:", (pass) => {
             if(pass === userPassword) {
-                fetch(`/connect-wifi?id=${id}`, { headers: { 'Authorization': authHeader } })
-                .then(() => {
-                    closeNotification();
-                    showNotification("🔄 Conectando...", "El ESP32 se está reiniciando para conectarse.");
-                });
-            } else {
-                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
+                fetch(`/connect-wifi?id=${id}`, { headers: { 'Authorization': authHeader } });
             }
         });
     }
 
     function requestDelWifi(id) {
-        showAuthDialog("🔒 Autorizar Eliminación", "Ingresa tu contraseña personal para borrar la red:", (pass) => {
+        showAuthDialog("🔒 Autorizar", "Ingresa contraseña para borrar:", (pass) => {
             if(pass === userPassword) {
-                fetch(`/del-wifi?id=${id}`, { headers: { 'Authorization': authHeader } })
-                .then(() => {
-                    closeNotification();
-                    loadNetworks();
-                    showNotification("🗑️ Eliminada", "Red eliminada de la lista.");
-                });
-            } else {
-                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
+                fetch(`/del-wifi?id=${id}`, { headers: { 'Authorization': authHeader } }).then(() => { closeNotification(); loadNetworks(); });
             }
         });
     }
 
     function syncWithDevice() {
         const epoch = Math.floor(Date.now() / 1000);
-        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } })
-        .then(() => getESPTime());
+        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } }).then(() => getESPTime());
     }
 
     function timerStart() {
-        const h = Math.max(0, Math.min(99, parseInt(document.getElementById('timerHours').value || 0)));
-        const m = Math.max(0, Math.min(59, parseInt(document.getElementById('timerMinutes').value || 0)));
-        const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('timerSeconds').value || 0)));
-
-        fetch(`/timer-start?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}})
-            .then(r => r.text())
-            .then(() => { setDisplayMode('timer'); loadTimer(); })
-            .catch(() => showNotification('Error', 'No se pudo iniciar el cronómetro.'));
+        const h = parseInt(document.getElementById('timerHours').value || 0);
+        const m = parseInt(document.getElementById('timerMinutes').value || 0);
+        const sec = parseInt(document.getElementById('timerSeconds').value || 0);
+        fetch(`/timer-start?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}}).then(() => setDisplayMode('timer'));
     }
 
-    function timerPause() {
-        fetch('/timer-pause', {headers:{'Authorization':authHeader}})
-            .then(r => r.text())
-            .then(() => { setDisplayMode('timer'); })
-            .catch(() => showNotification('Error', 'No se pudo pausar el cronómetro.'));
-    }
-
-    function timerReset() {
-        fetch('/timer-reset', {headers:{'Authorization':authHeader}})
-            .then(r => r.text())
-            .then(() => { setDisplayMode('timer'); })
-            .catch(() => showNotification('Error', 'No se pudo reiniciar el cronómetro.'));
-    }
+    function timerPause() { fetch('/timer-pause', {headers:{'Authorization':authHeader}}); }
+    function timerReset() { fetch('/timer-reset', {headers:{'Authorization':authHeader}}); }
 
     function actualizarModoPagina(mode, timerText) {
         const title = document.getElementById('mainModeTitle');
@@ -1196,38 +897,16 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
 
     function setDisplayMode(mode) {
-        if (mode === 'timer') {
-            actualizarModoPagina('timer');
-        } else {
-            actualizarModoPagina('clock');
-        }
-
-        fetch('/display-mode?mode=' + encodeURIComponent(mode), {headers:{'Authorization':authHeader}})
-            .then(r => r.text())
-            .then(() => loadTimer())
-            .catch(() => showNotification('Error', 'No se pudo cambiar el modo del display.'));
+        fetch('/display-mode?mode=' + encodeURIComponent(mode), {headers:{'Authorization':authHeader}}).then(() => loadTimer());
     }
 
     function loadTimer() {
         fetch('/get-timer', {headers:{'Authorization':authHeader}})
             .then(res => res.json())
             .then(t => {
-                const timerText = t.display || '00:00:00';
-                const mode = t.modo || 'clock';
-
-                document.getElementById('timerDisplay').innerText = timerText;
-                actualizarModoPagina(mode, timerText);
-
-                const active = document.activeElement;
-                if (active !== document.getElementById('timerHours') &&
-                    active !== document.getElementById('timerMinutes') &&
-                    active !== document.getElementById('timerSeconds')) {
-                    document.getElementById('timerHours').value = t.horas;
-                    document.getElementById('timerMinutes').value = t.minutos;
-                    document.getElementById('timerSeconds').value = t.segundos;
-                }
-            })
-            .catch(() => {});
+                document.getElementById('timerDisplay').innerText = t.display || '00:00:00';
+                actualizarModoPagina(t.modo, t.display);
+            });
     }
 
     function loadAlarms() {
@@ -1251,28 +930,21 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     function addAlarm() {
         const val = document.getElementById('alarmInput').value;
-        if(!val) return showNotification("Hora requerida", "Selecciona un horario para la alarma.");
-
-        fetch('/add-alarm?time=' + val, { headers: { 'Authorization': authHeader } })
-        .then(() => loadAlarms());
+        if(!val) return;
+        fetch('/add-alarm?time=' + val, { headers: { 'Authorization': authHeader } }).then(() => loadAlarms());
     }
 
     function deleteAlarm(id) {
-        fetch('/del-alarm?id=' + id, { headers: { 'Authorization': authHeader } })
-        .then(() => loadAlarms());
+        fetch('/del-alarm?id=' + id, { headers: { 'Authorization': authHeader } }).then(() => loadAlarms());
     }
 </script>
-
 </body>
 </html>
 )rawliteral";
 
 void iniciarModoDual() {
-  Serial.println("\n--- Activando Modo Dual (AP + STA) ---");
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP("ESP32-Reloj-Config", "12345678");
-  Serial.print("Punto de acceso permanente activo: http://");
-  Serial.println(WiFi.softAPIP());
 }
 
 bool conectarWifiPorIndice(int index) {
@@ -1288,13 +960,11 @@ bool conectarWifiPorIndice(int index) {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  Serial.printf("Conectando a red [%s]...\n", target_ssid.c_str());
   WiFi.begin(target_ssid.c_str(), target_pass.c_str());
 
   int intentos = 0;
   while (WiFi.status() != WL_CONNECTED && intentos < 20) {
     delay(500);
-    Serial.print(".");
     intentos++;
   }
 
@@ -1303,9 +973,7 @@ bool conectarWifiPorIndice(int index) {
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
 
-  // Configuracion de Segmentos
   pinMode(segA, OUTPUT);
   pinMode(segB, OUTPUT);
   pinMode(segC, OUTPUT);
@@ -1314,7 +982,6 @@ void setup() {
   pinMode(segF, OUTPUT);
   pinMode(segG, OUTPUT);
 
-  // Configuracion de Digitos
   pinMode(dig0, OUTPUT);
   pinMode(dig1, OUTPUT);
   pinMode(dig2, OUTPUT);
@@ -1323,53 +990,29 @@ void setup() {
   apagarDigitos();
   apagarSegmentos();
 
-  // DS3231 - I2C del ESP32
   Wire.begin(21, 22);
-
-  if (!ds3231.begin()) {
-    Serial.println("ERROR: No se encontro el DS3231. Verifica SDA, SCL, VCC y GND.");
-  } else {
-    Serial.println("DS3231 detectado correctamente.");
-
-    if (ds3231.lostPower()) {
-      Serial.println("El DS3231 perdio la alimentacion o no tiene la hora configurada.");
-      Serial.println("Usa 'Sincronizar Celular' para ajustar la hora.");
-    }
-
-    DateTime ahora = ds3231.now();
-    rtc.setTime(ahora.unixtime());
-    Serial.printf("Hora DS3231: %02d:%02d:%02d\n", ahora.hour(), ahora.minute(), ahora.second());
-  }
+  ds3231.begin();
 
   cargarAlarmas();
 
   int totalRedes = getNetworkCount();
   if (totalRedes > 0) {
-    Serial.printf("\nSe encontraron %d redes Wi-Fi guardadas.\n", totalRedes);
-    if (conectarWifiPorIndice(0)) {
-      Serial.println("\n🎉 ¡CONECTADO EXITOSAMENTE!");
-      Serial.print("IP asignada: http://");
-      Serial.println(WiFi.localIP());
-
-      if (MDNS.begin("reloj")) {
-        MDNS.addService("http", "tcp", 80);
-        Serial.println("Dominio local activo: http://reloj.local");
-      }
-    } else {
-      Serial.println("\n❌ No se pudo conectar a la red predeterminada.");
-    }
+    conectarWifiPorIndice(0);
   } else {
-    Serial.println("No hay redes Wi-Fi guardadas.");
     iniciarModoDual();
   }
 
   server.begin();
   actualizarBufferDisplay();
+
+  // Configuración del Timer por Hardware adaptado a ESP32 Core v3.x
+  timerDisplay = timerBegin(1000000);                      // Frecuencia del timer: 1 MHz (1 tick = 1 microsegundo)
+  timerAttachInterrupt(timerDisplay, &onTimerDisplay);     // Asocia la función de interrupción
+  timerAlarm(timerDisplay, 1000, true, 0);                 // Interrupción cada 1000 us (1 ms), autorrecarga activada
 }
 
 void loop() {
   actualizarBufferDisplay();
-  multiplexarDisplay();
   servicioRemoto();
 
   WiFiClient client = server.available();
@@ -1379,14 +1022,12 @@ void loop() {
     String requestHeader = "";
 
     while (client.connected()) {
-      multiplexarDisplay(); // Mantener encendido el display sin congelar mientras atiende peticiones
       if (client.available()) {
         char c = client.read();
         requestHeader += c;
 
         if (c == '\n') {
           if (currentLine.length() == 0) {
-
             if (requestHeader.indexOf("GET /login-user") >= 0) {
               int idxUser = requestHeader.indexOf("user=") + 5;
               int endUser = requestHeader.indexOf("&", idxUser);
@@ -1442,8 +1083,7 @@ void loop() {
               client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}");
             }
             else if (requestHeader.indexOf("GET /get-current-network") >= 0) {
-              String currentSSID = WiFi.SSID();
-              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + currentSSID);
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + WiFi.SSID());
             }
             else if (requestHeader.indexOf("GET /get-networks") >= 0) {
               client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + getNetworkJSON());
@@ -1467,42 +1107,8 @@ void loop() {
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
             else if (requestHeader.indexOf("GET /connect-wifi?") >= 0) {
-              int idx = requestHeader.indexOf("id=") + 3;
-              int targetId = requestHeader.substring(idx, requestHeader.indexOf(" ", idx)).toInt();
-
-              preferences.begin("wifi-list", true);
-              String s = preferences.getString(("ssid_" + String(targetId)).c_str(), "");
-              String p = preferences.getString(("pass_" + String(targetId)).c_str(), "");
-              preferences.end();
-
-              if (s != "") {
-                removeNetwork(targetId);
-                std::vector<std::pair<String, String>> temp;
-                temp.push_back({s, p});
-
-                int count = getNetworkCount();
-                preferences.begin("wifi-list", true);
-                for (int i = 0; i < count; i++) {
-                  temp.push_back({
-                    preferences.getString(("ssid_" + String(i)).c_str(), ""),
-                    preferences.getString(("pass_" + String(i)).c_str(), "")
-                  });
-                }
-                preferences.end();
-
-                preferences.begin("wifi-list", false);
-                preferences.clear();
-                preferences.putInt("count", temp.size());
-
-                for (size_t i = 0; i < temp.size(); i++) {
-                  preferences.putString(("ssid_" + String(i)).c_str(), temp[i].first);
-                  preferences.putString(("pass_" + String(i)).c_str(), temp[i].second);
-                }
-                preferences.end();
-              }
-
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
-              delay(1000);
+              delay(500);
               ESP.restart();
             }
             else if (requestHeader.indexOf("GET /set-timezone?offset=") >= 0) {
@@ -1514,14 +1120,7 @@ void loop() {
               DateTime ahora = ds3231.now();
               char hora[9];
               snprintf(hora, sizeof(hora), "%02d:%02d:%02d", ahora.hour(), ahora.minute(), ahora.second());
-
-              client.println("HTTP/1.1 200 OK");
-              client.println("Content-Type: text/plain");
-              client.println("Cache-Control: no-cache, no-store, must-revalidate");
-              client.println("Pragma: no-cache");
-              client.println("Expires: 0");
-              client.println("Connection: close\r\n");
-              client.println(hora);
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-cache\r\n\r\n" + String(hora));
             }
             else if (requestHeader.indexOf("GET /set-time?epoch=") >= 0) {
               int idx = requestHeader.indexOf("epoch=") + 6;
@@ -1550,20 +1149,6 @@ void loop() {
                             ",\"modo\":\"" + String(modoCronometro ? "timer" : "clock") +
                             "\",\"display\":\"" + String(display) + "\"}";
               client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + json);
-            }
-            else if (requestHeader.indexOf("GET /timer-set?") >= 0) {
-              int hidx = requestHeader.indexOf("h=") + 2;
-              int midx = requestHeader.indexOf("m=") + 2;
-              int sidx = requestHeader.indexOf("s=") + 2;
-              int h = requestHeader.substring(hidx, requestHeader.indexOf("&", hidx)).toInt();
-              int m = requestHeader.substring(midx, requestHeader.indexOf("&", midx)).toInt();
-              int sec = requestHeader.substring(sidx, requestHeader.indexOf(" ", sidx)).toInt();
-              h = constrain(h, 0, 99); m = constrain(m, 0, 59); sec = constrain(sec, 0, 59);
-              timerTotalSegundos = (uint32_t)h * 3600UL + (uint32_t)m * 60UL + (uint32_t)sec;
-              timerRestantesSegundos = timerTotalSegundos;
-              timerCorriendo = false;
-              modoCronometro = true;
-              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
             else if (requestHeader.indexOf("GET /timer-start") >= 0) {
               int h = 0, m = 0, sec = 0;
@@ -1597,11 +1182,6 @@ void loop() {
                 timerUltimoTick = millis();
                 timerCorriendo = true;
                 modoCronometro = true;
-                Serial.printf("Cronometro iniciado: %02d:%02d:%02d\n", h, m, sec);
-              } else {
-                timerCorriendo = false;
-                modoCronometro = true;
-                Serial.println("Cronometro no iniciado: tiempo en 00:00:00.");
               }
 
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
@@ -1622,12 +1202,8 @@ void loop() {
               int midx = requestHeader.indexOf("mode=") + 5;
               String mode = requestHeader.substring(midx, requestHeader.indexOf(" ", midx));
 
-              if (mode.indexOf("timer") >= 0) {
-                modoCronometro = true;
-              } else {
-                modoCronometro = false;
-                timerCorriendo = false;
-              }
+              modoCronometro = (mode.indexOf("timer") >= 0);
+              if (!modoCronometro) timerCorriendo = false;
 
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
@@ -1646,13 +1222,7 @@ void loop() {
               int idx = requestHeader.indexOf("time=") + 5;
               String timeStr = requestHeader.substring(idx, requestHeader.indexOf(" ", idx));
 
-              Alarma nueva = {
-                proximoId++,
-                timeStr.substring(0, 2).toInt(),
-                timeStr.substring(3, 5).toInt(),
-                true
-              };
-
+              Alarma nueva = { proximoId++, timeStr.substring(0, 2).toInt(), timeStr.substring(3, 5).toInt(), true };
               listaAlarmas.push_back(nueva);
               guardarAlarmas();
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
@@ -1666,7 +1236,6 @@ void loop() {
                   break;
                 }
               }
-
               guardarAlarmas();
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
