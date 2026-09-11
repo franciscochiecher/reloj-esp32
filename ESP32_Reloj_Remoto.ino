@@ -6,16 +6,21 @@
 #include <Wire.h>
 #include <RTClib.h>
 #include <vector>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 
 Preferences preferences;
 ESP32Time rtc;
 RTC_DS3231 ds3231;
 WiFiServer server(80);
 
-// DISPLAY 4 DIGITOS - SIN MAX7219
+// ============================================================
+// DISPLAY 4 DIGITOS - MULTIPLEXADO DIRECTO, SIN MAX7219
 // Segmentos: A=13, B=14, C=16, D=17, E=18, F=19, G=23
 // Digitos:   DIG0=25, DIG1=26, DIG2=27, DIG3=32
-// El display fisico muestra HH:MM.
+// El display fisico muestra HH:MM en modo reloj.
+// En modo cronometro: HH:MM si queda >= 1 hora, MM:SS si queda < 1 hora.
+// ============================================================
 const int segA = 13;
 const int segB = 14;
 const int segC = 16;
@@ -60,6 +65,7 @@ void apagarSegmentos() {
 }
 
 void ponerNumero(byte numero) {
+  if (numero > 9) numero = 0;
   digitalWrite(segA, numeros[numero][0]);
   digitalWrite(segB, numeros[numero][1]);
   digitalWrite(segC, numeros[numero][2]);
@@ -69,41 +75,37 @@ void ponerNumero(byte numero) {
   digitalWrite(segG, numeros[numero][6]);
 }
 
-// Multiplexado no bloqueante: cambia de digito cada 2 ms con tiempo muerto anti-ghosting.
-// Asi el display sigue actualizandose incluso mientras se atiende la pagina web.
+// Valores que se muestran en los 4 digitos.
+// displayDigitos[0] = izquierda, [3] = derecha.
 byte displayDigitos[4] = {0, 0, 0, 0};
 byte displayActual = 0;
 unsigned long displayAnterior = 0;
 
-void prepararHoraDisplay() {
-  DateTime ahora = ds3231.now();
-
-  displayDigitos[0] = ahora.hour() / 10;
-  displayDigitos[1] = ahora.hour() % 10;
-  displayDigitos[2] = ahora.minute() / 10;
-  displayDigitos[3] = ahora.minute() % 10;
+void prepararDisplay(byte d3, byte d2, byte d1, byte d0) {
+  displayDigitos[0] = d3;
+  displayDigitos[1] = d2;
+  displayDigitos[2] = d1;
+  displayDigitos[3] = d0;
 }
 
 void refrescarDisplay() {
   unsigned long ahoraMicros = micros();
 
+  // Cambia de digito cada 2 ms.
   if (ahoraMicros - displayAnterior < 2000) return;
   displayAnterior = ahoraMicros;
 
-  // CORTE TOTAL ANTES DE CAMBIAR DE DIGITO
-  // Evita el "ghosting" (LEDs que quedan encendidos tenuemente).
+  // TIEMPO MUERTO: primero se apaga absolutamente todo.
+  // Esto evita el ghosting de los IRF9540/2N3904.
   apagarDigitos();
   apagarSegmentos();
-
-  // Tiempo para que los IRF9540 y 2N3904 terminen de apagarse.
   delayMicroseconds(250);
 
+  // Se preparan los segmentos con todos los digitos apagados.
   ponerNumero(displayDigitos[displayActual]);
-
-  // Pequeña espera con los segmentos preparados pero TODOS los
-  // digitos todavia apagados.
   delayMicroseconds(50);
 
+  // Se enciende solamente el digito correspondiente.
   if (displayActual == 0) digitalWrite(dig0, HIGH);
   else if (displayActual == 1) digitalWrite(dig1, HIGH);
   else if (displayActual == 2) digitalWrite(dig2, HIGH);
@@ -113,19 +115,10 @@ void refrescarDisplay() {
   if (displayActual >= 4) displayActual = 0;
 }
 
-void actualizarMAX7219() {
-  // Se conserva este nombre para que el resto del programa original
-  // siga funcionando sin tocar la pagina web.
-  static unsigned long anteriorHora = 0;
-  unsigned long ahoraMillis = millis();
+// Se conserva el nombre para no tocar la logica de la pagina web/remota.
+void actualizarMAX7219();
 
-  if (ahoraMillis - anteriorHora >= 250 || anteriorHora == 0) {
-    anteriorHora = ahoraMillis;
-    prepararHoraDisplay();
-  }
 
-  refrescarDisplay();
-}
 
 long gmtOffset_sec = -10800; // UTC-3 (Argentina)
 
@@ -138,6 +131,328 @@ struct Alarma {
 
 std::vector<Alarma> listaAlarmas;
 int proximoId = 1;
+
+// ============================================================
+// GUARDADO PERMANENTE DE ALARMAS EN LA MEMORIA NVS DEL ESP32
+// ============================================================
+// Las alarmas se guardan en cada alta/baja y se recuperan al
+// iniciar el ESP32. No se borran al resetear o apagar.
+
+void guardarAlarmas() {
+  Preferences alarmPrefs;
+
+  if (!alarmPrefs.begin("alarmas", false)) {
+    Serial.println("ERROR: No se pudo abrir NVS para guardar alarmas.");
+    return;
+  }
+
+  const uint32_t cantidad = (uint32_t)listaAlarmas.size();
+  alarmPrefs.putUInt("count", cantidad);
+  alarmPrefs.putUInt("nextId", (uint32_t)proximoId);
+
+  // Guardamos el vector completo como bytes. Esto evita depender de
+  // muchas claves de texto y hace el guardado más fiable tras un reset.
+  if (cantidad > 0) {
+    size_t bytes = cantidad * sizeof(Alarma);
+    size_t escritos = alarmPrefs.putBytes("data", listaAlarmas.data(), bytes);
+    if (escritos != bytes) {
+      Serial.printf("ERROR: solo se guardaron %u de %u bytes.\n",
+                    (unsigned)escritos, (unsigned)bytes);
+    }
+  } else {
+    alarmPrefs.remove("data");
+  }
+
+  alarmPrefs.end();
+  Serial.printf("Alarmas guardadas en NVS: %u\n", (unsigned)cantidad);
+}
+
+void cargarAlarmas() {
+  Preferences alarmPrefs;
+
+  // Abrimos en modo lectura/escritura.
+  // Si la particion/namespace "alarmas" todavia no existe (primer arranque),
+  // Preferences puede fallar al abrirlo en modo solo lectura.
+  // En modo false el namespace se crea automaticamente.
+  if (!alarmPrefs.begin("alarmas", false)) {
+    Serial.println("ERROR: No se pudo abrir/crear NVS para cargar alarmas.");
+    return;
+  }
+
+  listaAlarmas.clear();
+  uint32_t cantidad = alarmPrefs.getUInt("count", 0);
+  proximoId = (int)alarmPrefs.getUInt("nextId", 1);
+
+  if (cantidad > 50) cantidad = 50;
+
+  size_t esperado = cantidad * sizeof(Alarma);
+  size_t disponible = alarmPrefs.getBytesLength("data");
+
+  if (cantidad > 0 && disponible >= esperado) {
+    listaAlarmas.resize(cantidad);
+    size_t leidos = alarmPrefs.getBytes("data", listaAlarmas.data(), esperado);
+    if (leidos != esperado) {
+      listaAlarmas.clear();
+      Serial.println("ERROR: datos de alarmas incompletos. Se inicia sin alarmas.");
+    }
+  }
+
+  alarmPrefs.end();
+
+  int mayorId = 0;
+  for (const auto &alarma : listaAlarmas) {
+    if (alarma.id > mayorId) mayorId = alarma.id;
+  }
+  if (proximoId <= mayorId) proximoId = mayorId + 1;
+  if (proximoId < 1) proximoId = 1;
+
+  Serial.printf("Alarmas cargadas desde NVS: %u\n",
+                (unsigned)listaAlarmas.size());
+}
+
+// ============================================================
+// CRONOMETRO / TEMPORIZADOR
+// ============================================================
+// El tiempo se configura desde la pagina. En el display de 4 digitos
+// se muestra MM:SS cuando queda menos de una hora y HH:MM cuando queda
+// una hora o mas. En la pagina siempre se muestra HH:MM:SS.
+uint32_t timerTotalSegundos = 0;
+uint32_t timerRestantesSegundos = 0;
+bool timerCorriendo = false;
+unsigned long timerUltimoTick = 0;
+bool modoCronometro = false;
+
+
+// ============================================================
+// ACCESO REMOTO POR INTERNET
+// El ESP32 inicia las conexiones hacia el servidor, por lo que
+// no hace falta abrir puertos del router.
+// ============================================================
+const char* REMOTE_SERVER_URL = "https://reloj-esp32.onrender.com//api/device";
+const char* DEVICE_TOKEN = "Franchula2017";
+unsigned long ultimoPollRemoto = 0;
+unsigned long ultimoStateRemoto = 0;
+
+String campoComando(const String &linea, int numero) {
+  int inicio = 0;
+  for (int i = 0; i < numero; i++) {
+    inicio = linea.indexOf('|', inicio);
+    if (inicio < 0) return "";
+    inicio++;
+  }
+  int fin = linea.indexOf('|', inicio);
+  if (fin < 0) fin = linea.length();
+  return linea.substring(inicio, fin);
+}
+
+void ejecutarComandoRemoto(const String &linea) {
+  if (linea.length() == 0 || linea == "NO_COMMANDS") return;
+
+  String tipo = campoComando(linea, 0);
+  Serial.println("Comando remoto: " + linea);
+
+  if (tipo == "timer_start") {
+    int h = constrain(campoComando(linea, 1).toInt(), 0, 99);
+    int m = constrain(campoComando(linea, 2).toInt(), 0, 59);
+    int sec = constrain(campoComando(linea, 3).toInt(), 0, 59);
+    uint32_t total = (uint32_t)h * 3600UL + (uint32_t)m * 60UL + (uint32_t)sec;
+    if (total > 0) {
+      timerTotalSegundos = total;
+      timerRestantesSegundos = total;
+      timerUltimoTick = millis();
+      timerCorriendo = true;
+      modoCronometro = true;
+      Serial.printf("Cronometro remoto iniciado: %02d:%02d:%02d\n", h, m, sec);
+    }
+  }
+  else if (tipo == "timer_pause") {
+    actualizarTimer();
+    timerRestantesSegundos = obtenerTimerRestante();
+    timerCorriendo = false;
+  }
+  else if (tipo == "timer_reset") {
+    timerRestantesSegundos = timerTotalSegundos;
+    timerCorriendo = false;
+    modoCronometro = true;
+  }
+  else if (tipo == "display_mode") {
+    String modo = campoComando(linea, 1);
+    if (modo == "timer") {
+      modoCronometro = true;
+    } else {
+      modoCronometro = false;
+      timerCorriendo = false;
+    }
+  }
+  else if (tipo == "set_time") {
+    unsigned long epoch = strtoul(campoComando(linea, 1).c_str(), nullptr, 10);
+    unsigned long horaLocal = epoch + gmtOffset_sec;
+    rtc.setTime(horaLocal);
+    ds3231.adjust(DateTime(horaLocal));
+    Serial.println("Hora ajustada remotamente.");
+  }
+  else if (tipo == "add_alarm") {
+    String timeStr = campoComando(linea, 1);
+    if (timeStr.length() >= 5) {
+      Alarma nueva = {
+        proximoId++,
+        timeStr.substring(0, 2).toInt(),
+        timeStr.substring(3, 5).toInt(),
+        true
+      };
+      listaAlarmas.push_back(nueva);
+      guardarAlarmas();
+    }
+  }
+  else if (tipo == "del_alarm") {
+    int idDel = campoComando(linea, 1).toInt();
+    for (auto it = listaAlarmas.begin(); it != listaAlarmas.end(); ++it) {
+      if (it->id == idDel) {
+        listaAlarmas.erase(it);
+        break;
+      }
+    }
+    guardarAlarmas();
+  }
+}
+
+void enviarEstadoRemoto() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure clientSecure;
+  clientSecure.setInsecure();
+  HTTPClient http;
+  String url = String(REMOTE_SERVER_URL) + "/state";
+  if (!http.begin(clientSecure, url)) return;
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Token", DEVICE_TOKEN);
+
+  actualizarTimer();
+  uint32_t restante = obtenerTimerRestante();
+  uint32_t hh = restante / 3600UL;
+  uint32_t mm = (restante % 3600UL) / 60UL;
+  uint32_t ss = restante % 60UL;
+  char timerText[16];
+  snprintf(timerText, sizeof(timerText), "%02lu:%02lu:%02lu",
+           (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+
+  DateTime ahora = ds3231.now();
+  char horaText[16];
+  snprintf(horaText, sizeof(horaText), "%02d:%02d:%02d",
+           ahora.hour(), ahora.minute(), ahora.second());
+
+  String json = "{\"hora\":\"" + String(horaText) +
+                "\",\"timer\":{" +
+                "\"horas\":" + String(hh) +
+                ",\"minutos\":" + String(mm) +
+                ",\"segundos\":" + String(ss) +
+                ",\"corriendo\":" + String(timerCorriendo ? "true" : "false") +
+                "},\"modo\":\"" + String(modoCronometro ? "timer" : "clock") +
+                "\",\"display\":\"" + String(timerText) +
+                "\",\"wifi\":\"" + WiFi.SSID() + "\",\"alarms\":[";
+
+  for (size_t i = 0; i < listaAlarmas.size(); i++) {
+    json += "{\"id\":" + String(listaAlarmas[i].id) +
+            ",\"hora\":" + String(listaAlarmas[i].hora) +
+            ",\"minuto\":" + String(listaAlarmas[i].minuto) + "}";
+    if (i + 1 < listaAlarmas.size()) json += ",";
+  }
+  json += "]}";
+
+  int code = http.POST(json);
+  if (code < 0) Serial.printf("Error enviando estado remoto: %d\n", code);
+  http.end();
+}
+
+void consultarServidorRemoto() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure clientSecure;
+  clientSecure.setInsecure();
+  HTTPClient http;
+  String url = String(REMOTE_SERVER_URL) + "/poll";
+  if (!http.begin(clientSecure, url)) return;
+  http.addHeader("X-Device-Token", DEVICE_TOKEN);
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) {
+    String body = http.getString();
+    int inicio = 0;
+    while (inicio < body.length()) {
+      int fin = body.indexOf('\n', inicio);
+      if (fin < 0) fin = body.length();
+      String linea = body.substring(inicio, fin);
+      linea.trim();
+      if (linea.length()) ejecutarComandoRemoto(linea);
+      inicio = fin + 1;
+    }
+  }
+  http.end();
+}
+
+void servicioRemoto() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  unsigned long ahora = millis();
+  if (ahora - ultimoPollRemoto >= 500) {
+    ultimoPollRemoto = ahora;
+    consultarServidorRemoto();
+  }
+  if (ahora - ultimoStateRemoto >= 1000) {
+    ultimoStateRemoto = ahora;
+    enviarEstadoRemoto();
+  }
+}
+
+uint32_t obtenerTimerRestante() {
+  if (!timerCorriendo) return timerRestantesSegundos;
+  unsigned long transcurrido = (millis() - timerUltimoTick) / 1000UL;
+  if (transcurrido >= timerRestantesSegundos) return 0;
+  return timerRestantesSegundos - transcurrido;
+}
+
+void actualizarTimer() {
+  if (!timerCorriendo) return;
+
+  unsigned long ahora = millis();
+  if (ahora - timerUltimoTick >= 1000UL) {
+    unsigned long transcurrido = (ahora - timerUltimoTick) / 1000UL;
+    timerUltimoTick += transcurrido * 1000UL;
+
+    if (transcurrido >= timerRestantesSegundos) {
+      timerRestantesSegundos = 0;
+      timerCorriendo = false;
+      Serial.println("Cronometro finalizado.");
+    } else {
+      timerRestantesSegundos -= transcurrido;
+    }
+  }
+}
+
+void actualizarMAX7219() {
+  actualizarTimer();
+
+  if (modoCronometro) {
+    uint32_t restante = obtenerTimerRestante();
+    uint32_t horas = restante / 3600UL;
+    uint32_t minutos = (restante % 3600UL) / 60UL;
+    uint32_t segundos = restante % 60UL;
+
+    if (horas > 0) {
+      if (horas > 99) horas = 99;
+      prepararDisplay((byte)(horas / 10), (byte)(horas % 10),
+                      (byte)(minutos / 10), (byte)(minutos % 10));
+    } else {
+      prepararDisplay((byte)(minutos / 10), (byte)(minutos % 10),
+                      (byte)(segundos / 10), (byte)(segundos % 10));
+    }
+  } else {
+    DateTime ahora = ds3231.now();
+    prepararDisplay((byte)(ahora.hour() / 10), (byte)(ahora.hour() % 10),
+                    (byte)(ahora.minute() / 10), (byte)(ahora.minute() % 10));
+  }
+
+  refrescarDisplay();
+}
 
 // Decodificación de caracteres especiales en URL
 String urlDecode(String input) {
@@ -664,7 +979,9 @@ const char index_html[] PROGMEM = R"rawliteral(
     <!-- Reloj -->
     <div class="card">
 
-        <h2>⏱️ Hora del Reloj</h2>
+        <h2 id="mainModeTitle">⏱️ Hora del Reloj</h2>
+
+        <div id="mainModeBadge" style="text-align:center; color:#aaa; font-size:.85rem; margin-top:-5px;">🕐 MODO RELOJ</div>
 
         <div
             class="clock-display"
@@ -795,6 +1112,38 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     </div>
 
+    <!-- Cronometro -->
+    <div class="card">
+
+        <h2>⏱️ Cronómetro / Temporizador</h2>
+
+        <div class="clock-display" id="timerDisplay">00:00:00</div>
+
+        <div class="form-group">
+            <label>Tiempo a configurar:</label>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <input type="number" id="timerHours" min="0" max="99" value="0" placeholder="Horas" style="flex:1; min-width:90px;">
+                <input type="number" id="timerMinutes" min="0" max="59" value="5" placeholder="Minutos" style="flex:1; min-width:90px;">
+                <input type="number" id="timerSeconds" min="0" max="59" value="0" placeholder="Segundos" style="flex:1; min-width:90px;">
+            </div>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+            <button onclick="timerStart()">▶️ Iniciar</button>
+            <button onclick="timerPause()">⏸️ Pausar</button>
+            <button onclick="timerReset()">🔄 Reiniciar</button>
+        </div>
+
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px;">
+            <button class="btn-outline" onclick="setDisplayMode('clock')">🕐 Modo Reloj</button>
+            <button class="btn-outline" onclick="setDisplayMode('timer')">⏱️ Modo Cronómetro</button>
+        </div>
+
+        <p style="color:#aaa; margin-top:10px; font-size:.85rem;">
+            El reloj físico mostrará el modo elegido. En cronómetro: MM:SS; si queda una hora o más, HH:MM.
+        </p>
+    </div>
+
     <!-- Alarmas -->
     <div class="card">
 
@@ -833,6 +1182,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     let confirmCallback = null;
     let activeAlarms = [];
     let lastTriggeredMinute = "";
+    let timerPoll = null;
 
     function switchTab(tab) {
 
@@ -1055,8 +1405,10 @@ const char index_html[] PROGMEM = R"rawliteral(
             syncWithDevice();
 
             setInterval(getESPTime, 1000);
+            timerPoll = setInterval(loadTimer, 1000);
 
             loadAlarms();
+            loadTimer();
             loadNetworks();
 
             // NUEVO: cargar la red Wi-Fi actual
@@ -1065,26 +1417,29 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
 
     function getESPTime() {
-
-        fetch(
-            '/get-time',
-            {
-                headers: {
-                    'Authorization': authHeader
+        // Cada modo tiene su propia fuente de datos.
+        // Si estamos en cronometro, NO consultamos ni mostramos la hora del reloj.
+        fetch('/get-timer', {headers:{'Authorization':authHeader}})
+            .then(res => res.json())
+            .then(timerState => {
+                if (timerState.modo === 'timer') {
+                    document.getElementById('clock').innerText = timerState.display;
+                    actualizarModoPagina('timer', timerState.display);
+                    return;
                 }
-            }
-        )
-        .then(res => res.text())
-        .then(t => {
 
-            if(t) {
-
-                document.getElementById('clock')
-                    .innerText = t;
-
-                checkAlarmTrigger(t);
-            }
-        });
+                // Solo en MODO RELOJ se consulta el DS3231.
+                return fetch('/get-time', {headers:{'Authorization':authHeader}})
+                    .then(res => res.text())
+                    .then(t => {
+                        if (t) {
+                            document.getElementById('clock').innerText = t;
+                            actualizarModoPagina('clock');
+                            checkAlarmTrigger(t);
+                        }
+                    });
+            })
+            .catch(() => {});
     }
 
     // NUEVO: MOSTRAR LA RED WI-FI ACTUAL
@@ -1419,6 +1774,97 @@ const char index_html[] PROGMEM = R"rawliteral(
         .then(() => getESPTime());
     }
 
+    function timerSet() {
+        const h = Math.max(0, Math.min(99, parseInt(document.getElementById('timerHours').value || 0)));
+        const m = Math.max(0, Math.min(59, parseInt(document.getElementById('timerMinutes').value || 0)));
+        const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('timerSeconds').value || 0)));
+        fetch(`/timer-set?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}})
+            .then(r => r.text())
+            .then(() => setDisplayMode('timer'))
+            .catch(() => showNotification('Error', 'No se pudo configurar el cronómetro.'));
+    }
+
+    function timerStart() {
+        // Al iniciar, toma directamente el tiempo escrito en los campos.
+        // Ya no hace falta un boton separado de "Configurar".
+        const h = Math.max(0, Math.min(99, parseInt(document.getElementById('timerHours').value || 0)));
+        const m = Math.max(0, Math.min(59, parseInt(document.getElementById('timerMinutes').value || 0)));
+        const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('timerSeconds').value || 0)));
+
+        fetch(`/timer-start?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}})
+            .then(r => r.text())
+            .then(() => {
+                setDisplayMode('timer');
+                loadTimer();
+            })
+            .catch(() => showNotification('Error', 'No se pudo iniciar el cronómetro.'));
+    }
+
+    function timerPause() {
+        fetch('/timer-pause', {headers:{'Authorization':authHeader}})
+            .then(r => r.text())
+            .then(() => { setDisplayMode('timer'); })
+            .catch(() => showNotification('Error', 'No se pudo pausar el cronómetro.'));
+    }
+
+    function timerReset() {
+        fetch('/timer-reset', {headers:{'Authorization':authHeader}})
+            .then(r => r.text())
+            .then(() => { setDisplayMode('timer'); })
+            .catch(() => showNotification('Error', 'No se pudo reiniciar el cronómetro.'));
+    }
+
+    function actualizarModoPagina(mode, timerText) {
+        const title = document.getElementById('mainModeTitle');
+        const badge = document.getElementById('mainModeBadge');
+        const mainDisplay = document.getElementById('clock');
+
+        if (mode === 'timer') {
+            title.innerText = '⏱️ Cronómetro / Temporizador';
+            badge.innerText = '⏱️ MODO CRONÓMETRO';
+            if (timerText) mainDisplay.innerText = timerText;
+        } else {
+            title.innerText = '⏱️ Hora del Reloj';
+            badge.innerText = '🕐 MODO RELOJ';
+        }
+    }
+
+    function setDisplayMode(mode) {
+        // Cambiamos inmediatamente la interfaz para que no dependa del polling.
+        if (mode === 'timer') {
+            actualizarModoPagina('timer');
+        } else {
+            actualizarModoPagina('clock');
+        }
+
+        fetch('/display-mode?mode=' + encodeURIComponent(mode), {headers:{'Authorization':authHeader}})
+            .then(r => r.text())
+            .then(() => loadTimer())
+            .catch(() => showNotification('Error', 'No se pudo cambiar el modo del display.'));
+    }
+
+    function loadTimer() {
+        fetch('/get-timer', {headers:{'Authorization':authHeader}})
+            .then(res => res.json())
+            .then(t => {
+                const timerText = t.display || '00:00:00';
+                const mode = t.modo || 'clock';
+
+                document.getElementById('timerDisplay').innerText = timerText;
+                actualizarModoPagina(mode, timerText);
+
+                const active = document.activeElement;
+                if (active !== document.getElementById('timerHours') &&
+                    active !== document.getElementById('timerMinutes') &&
+                    active !== document.getElementById('timerSeconds')) {
+                    document.getElementById('timerHours').value = t.horas;
+                    document.getElementById('timerMinutes').value = t.minutos;
+                    document.getElementById('timerSeconds').value = t.segundos;
+                }
+            })
+            .catch(() => {});
+    }
+
     function loadAlarms() {
 
         fetch(
@@ -1598,7 +2044,7 @@ void setup() {
 
   delay(1000);
 
-  // DISPLAY DIRECTO - GPIO
+  // DISPLAY DIRECTO - MULTIPLEXADO
   pinMode(segA, OUTPUT);
   pinMode(segB, OUTPUT);
   pinMode(segC, OUTPUT);
@@ -1636,6 +2082,9 @@ void setup() {
     Serial.printf("Hora DS3231: %02d:%02d:%02d\n",
                   ahora.hour(), ahora.minute(), ahora.second());
   }
+
+  // Recuperar las alarmas guardadas antes de iniciar el servidor.
+  cargarAlarmas();
 
   int totalRedes =
       getNetworkCount();
@@ -1690,6 +2139,7 @@ void setup() {
 void loop() {
 
   actualizarMAX7219();
+  servicioRemoto();
 
   WiFiClient client =
       server.available();
@@ -1700,9 +2150,6 @@ void loop() {
     String requestHeader = "";
 
     while (client.connected()) {
-
-      // Mantener el multiplexado del display mientras se atiende la pagina web.
-      actualizarMAX7219();
 
       if (client.available()) {
 
@@ -1919,6 +2366,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "{\"status\":\"ok\"}"
               );
@@ -1953,6 +2401,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n" +
                 getNetworkJSON()
               );
@@ -2001,6 +2450,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2027,6 +2477,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2141,6 +2592,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2168,6 +2620,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2175,7 +2628,7 @@ void loop() {
 
             else if (
               requestHeader.indexOf(
-                "GET /get-time"
+                "GET /get-time "
               ) >= 0
             ) {
 
@@ -2229,9 +2682,128 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
+            }
+
+            else if (requestHeader.indexOf("GET /get-timer ") >= 0) {
+              actualizarTimer();
+              uint32_t restante = obtenerTimerRestante();
+              uint32_t hh = restante / 3600UL;
+              uint32_t mm = (restante % 3600UL) / 60UL;
+              uint32_t ss = restante % 60UL;
+
+              char display[12];
+              snprintf(display, sizeof(display), "%02lu:%02lu:%02lu",
+                       (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+
+              String json = "{\"horas\":" + String(hh) +
+                            ",\"minutos\":" + String(mm) +
+                            ",\"segundos\":" + String(ss) +
+                            ",\"corriendo\":" + String(timerCorriendo ? "true" : "false") +
+                            ",\"modo\":\"" + String(modoCronometro ? "timer" : "clock") +
+                            "\",\"display\":\"" + String(display) + "\"}";
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + json);
+            }
+
+            else if (requestHeader.indexOf("GET /timer-set?") >= 0) {
+              int hidx = requestHeader.indexOf("h=") + 2;
+              int midx = requestHeader.indexOf("m=") + 2;
+              int sidx = requestHeader.indexOf("s=") + 2;
+              int h = requestHeader.substring(hidx, requestHeader.indexOf("&", hidx)).toInt();
+              int m = requestHeader.substring(midx, requestHeader.indexOf("&", midx)).toInt();
+              int sec = requestHeader.substring(sidx, requestHeader.indexOf(" ", sidx)).toInt();
+              h = constrain(h, 0, 99); m = constrain(m, 0, 59); sec = constrain(sec, 0, 59);
+              timerTotalSegundos = (uint32_t)h * 3600UL + (uint32_t)m * 60UL + (uint32_t)sec;
+              timerRestantesSegundos = timerTotalSegundos;
+              timerCorriendo = false;
+              modoCronometro = true;
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
+            }
+
+            else if (requestHeader.indexOf("GET /timer-start") >= 0) {
+              // Iniciar tambien recibe el tiempo de los campos de la pagina.
+              // Asi el usuario puede escribir minutos/segundos y pulsar INICIAR
+              // sin tener que configurar previamente.
+              int h = 0;
+              int m = 0;
+              int sec = 0;
+
+              int hidx = requestHeader.indexOf("h=");
+              int midx = requestHeader.indexOf("m=");
+              int sidx = requestHeader.indexOf("s=");
+
+              if (hidx >= 0) {
+                hidx += 2;
+                int end = requestHeader.indexOf("&", hidx);
+                if (end < 0) end = requestHeader.indexOf(" ", hidx);
+                h = requestHeader.substring(hidx, end).toInt();
+              }
+              if (midx >= 0) {
+                midx += 2;
+                int end = requestHeader.indexOf("&", midx);
+                if (end < 0) end = requestHeader.indexOf(" ", midx);
+                m = requestHeader.substring(midx, end).toInt();
+              }
+              if (sidx >= 0) {
+                sidx += 2;
+                int end = requestHeader.indexOf(" ", sidx);
+                sec = requestHeader.substring(sidx, end).toInt();
+              }
+
+              h = constrain(h, 0, 99);
+              m = constrain(m, 0, 59);
+              sec = constrain(sec, 0, 59);
+
+              uint32_t nuevoTotal = (uint32_t)h * 3600UL + (uint32_t)m * 60UL + (uint32_t)sec;
+              if (nuevoTotal > 0) {
+                timerTotalSegundos = nuevoTotal;
+                timerRestantesSegundos = nuevoTotal;
+                timerUltimoTick = millis();
+                timerCorriendo = true;
+                // Iniciar el cronometro activa exclusivamente este modo.
+                modoCronometro = true;
+                Serial.printf("Cronometro iniciado: %02d:%02d:%02d\n", h, m, sec);
+              } else {
+                timerCorriendo = false;
+                modoCronometro = true;
+                Serial.println("Cronometro no iniciado: tiempo en 00:00:00.");
+              }
+
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
+            }
+
+            else if (requestHeader.indexOf("GET /timer-pause") >= 0) {
+              actualizarTimer();
+              timerRestantesSegundos = obtenerTimerRestante();
+              timerCorriendo = false;
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
+            }
+
+            else if (requestHeader.indexOf("GET /timer-reset") >= 0) {
+              timerRestantesSegundos = timerTotalSegundos;
+              timerCorriendo = false;
+              modoCronometro = true;
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
+            }
+
+            else if (requestHeader.indexOf("GET /display-mode?mode=") >= 0) {
+              int midx = requestHeader.indexOf("mode=") + 5;
+              String mode = requestHeader.substring(midx, requestHeader.indexOf(" ", midx));
+
+              if (mode.indexOf("timer") >= 0) {
+                // MODO CRONOMETRO: el reloj deja de ser el modo activo.
+                modoCronometro = true;
+              } else {
+                // MODO RELOJ: detener completamente el cronometro para que
+                // ambos modos nunca funcionen al mismo tiempo.
+                modoCronometro = false;
+                timerCorriendo = false;
+              }
+
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
 
             else if (
@@ -2269,6 +2841,7 @@ void loop() {
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n" +
                 json
               );
@@ -2300,9 +2873,13 @@ void loop() {
                 nueva
               );
 
+              // Guardar inmediatamente la nueva alarma en NVS.
+              guardarAlarmas();
+
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2333,9 +2910,13 @@ void loop() {
                 }
               }
 
+              // Guardar tambien la eliminacion en NVS.
+              guardarAlarmas();
+
               client.println(
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/plain\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
                 "\r\n"
                 "OK"
               );
@@ -2368,9 +2949,6 @@ void loop() {
       }
     }
 
-    client.stop();
-  }
-}
     client.stop();
   }
 }
