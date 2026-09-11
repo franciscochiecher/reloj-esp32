@@ -85,18 +85,18 @@ void ponerNumero(byte numero) {
   digitalWrite(segG, numeros[numero][6]);
 }
 
-// Rutina de Interrupción por Hardware (Corregida para eliminar ghosting/brillo tenue)
+// Rutina de Interrupción por Hardware (Con retardo aumentado a 40us)
 void IRAM_ATTR onTimerDisplay() {
   portENTER_CRITICAL_ISR(&timerMux);
   
-  // 1. Apagar inmediatamente todos los dígitos para cortar corriente
+  // 1. Apagar inmediatamente todos los dígitos
   apagarDigitos();
   
-  // 2. Apagar todos los segmentos para limpiar líneas residuales
+  // 2. Apagar todos los segmentos
   apagarSegmentos();
 
-  // 3. Pequeña pausa para asegurar la descarga de capacitancia residual
-  ets_delay_us(2);
+  // 3. Pausa ampliada (40 us) para forzar la descarga de transistores lentos
+  ets_delay_us(40);
 
   // 4. Cargar el nuevo número en los segmentos
   ponerNumero(digitosBuff[digitoActualIndex]);
@@ -1005,10 +1005,10 @@ void setup() {
   server.begin();
   actualizarBufferDisplay();
 
-  // Configuración del Timer por Hardware adaptado a ESP32 Core v3.x
-  timerDisplay = timerBegin(1000000);                      // Frecuencia del timer: 1 MHz (1 tick = 1 microsegundo)
-  timerAttachInterrupt(timerDisplay, &onTimerDisplay);     // Asocia la función de interrupción
-  timerAlarm(timerDisplay, 1000, true, 0);                 // Interrupción cada 1000 us (1 ms), autorrecarga activada
+  // Configuración del Timer con 4 ms (4000 us) de intervalo entre conmutaciones
+  timerDisplay = timerBegin(1000000);                      // Frecuencia: 1 MHz (1 us por tick)
+  timerAttachInterrupt(timerDisplay, &onTimerDisplay);     // Callback de la ISR
+  timerAlarm(timerDisplay, 4000, true, 0);                 // Interrupción cada 4000 us (4 ms)
 }
 
 void loop() {
