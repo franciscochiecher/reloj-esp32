@@ -75,13 +75,17 @@ label{display:block;color:#bbb;font-size:.9rem;margin:9px 0 6px}.hidden{display:
 </div>
 
 <script>
-let authToken='',alarms=[],lastTriggered='',polling=null;
+let authToken='',alarms=[],polling=null;
 let clockDisplayTimer=null,clockSyncTimer=null;
 let clockMode='clock';
 let clockBaseMs=null,clockBaseLocalMs=null;
 let timerEndMs=null,timerPausedRemaining=0,timerRunning=false;
 let pendingMode=null,pendingModeUntil=0;
 let pendingTimerAction=null,pendingTimerUntil=0;
+
+// Variables para controlar la visualización de la alarma
+let currentActiveAlarm = '';
+let dismissedAlarms = new Set();
 
 const $=id=>document.getElementById(id);
 
@@ -221,7 +225,6 @@ async function loadState(){
     $('remoteState').innerText=online?'Online':'Offline';
     $('currentWifi').innerText=s.wifi||'No disponible';
 
-    // Nunca dejamos que una respuesta atrasada del servidor cambie un modo recién elegido.
     if(!pendingMode || Date.now()>pendingModeUntil){
       if(s.modo==='timer' && clockMode!=='timer'){
         clockMode='timer';setModeVisual('timer');
@@ -233,14 +236,12 @@ async function loadState(){
     const t=s.timer||{};
     const serverTotal=(Number(t.horas)||0)*3600+(Number(t.minutos)||0)*60+(Number(t.segundos)||0);
 
-    // Si acabamos de enviar una orden, no pisamos el estado local con una respuesta vieja.
     if(!pendingTimerAction || Date.now()>pendingTimerUntil){
       if(clockMode==='timer'){
         if(t.corriendo){
           if(!timerRunning){startLocalTimer(serverTotal);}
           else {
             const local=getLocalRemaining();
-            // Solo corregimos diferencias grandes; la latencia normal no produce saltos.
             if(Math.abs(local-serverTotal)>2){startLocalTimer(serverTotal);}
           }
         }else{
@@ -250,7 +251,6 @@ async function loadState(){
     }
 
     if(!['timerHours','timerMinutes','timerSeconds'].includes(document.activeElement?.id)){
-      // Mientras el usuario escribe, no tocamos los campos.
       if(!pendingTimerAction || Date.now()>pendingTimerUntil){
         $('timerHours').value=t.horas??0;
         $('timerMinutes').value=t.minutos??0;
@@ -316,7 +316,6 @@ function timerReset(){
   pendingTimerAction='reset';pendingTimerUntil=Date.now()+2500;
   pendingMode='timer';pendingModeUntil=Date.now()+2500;
   clockMode='timer';setModeVisual('timer');setTimerPaused(total);
-  // Restauramos exactamente lo que el usuario configuró.
   $('timerHours').value=h;$('timerMinutes').value=m;$('timerSeconds').value=s;
   sendCommand('timer_reset');
 }
@@ -345,8 +344,39 @@ function setManualTime(){
 function addAlarm(){const time=$('alarmInput').value;if(!time)return showModal('Hora requerida','Selecciona un horario para la alarma.');sendCommand('add_alarm',{time});$('alarmInput').value='';setTimeout(loadState,600)}
 function deleteAlarm(id){sendCommand('del_alarm',{id});setTimeout(loadState,600)}
 function renderAlarms(){const c=$('alarmContainer');c.innerHTML='';if(!alarms.length){c.innerHTML='<div class="item-list" style="color:#777;justify-content:center">No hay alarmas programadas.</div>';return}alarms.forEach(a=>{const h=String(a.hora??0).padStart(2,'0'),m=String(a.minuto??0).padStart(2,'0'),d=document.createElement('div');d.className='item-list';d.innerHTML='<span>⏰ '+h+':'+m+' hs</span><button class="btn-small btn-danger">Borrar</button>';d.querySelector('button').onclick=()=>deleteAlarm(a.id);c.appendChild(d)})}
-function checkAlarm(time){if(!time)return;const hm=String(time).slice(0,5),key=String(time).slice(0,16);if(lastTriggered===key)return;if(alarms.some(a=>String(a.hora).padStart(2,'0')+':'+String(a.minuto).padStart(2,'0')===hm&&a.activa!==false)){lastTriggered=key;$('alarmTime').innerText=hm;$('alarmModal').classList.remove('hidden')}}
-function closeAlarm(){$('alarmModal').classList.add('hidden')}
+
+function checkAlarm(time){
+  if(!time) return;
+  
+  // Extrae unicamente HH:MM
+  const hm = String(time).slice(0,5);
+  
+  // Limpia el registro de descartadas si cambió el minuto
+  if(currentActiveAlarm !== hm){
+    currentActiveAlarm = hm;
+    dismissedAlarms.clear();
+  }
+
+  // Verifica si hay alguna alarma activa programada para este minuto
+  const isAlarmTime = alarms.some(a => 
+    String(a.hora).padStart(2,'0') + ':' + String(a.minuto).padStart(2,'0') === hm && a.activa !== false
+  );
+
+  // Muestra el modal solo si es hora de la alarma y el usuario no la cerró previamente este minuto
+  if(isAlarmTime && !dismissedAlarms.has(hm)){
+    $('alarmTime').innerText = hm;
+    $('alarmModal').classList.remove('hidden');
+  } else if(!isAlarmTime) {
+    $('alarmModal').classList.add('hidden');
+  }
+}
+
+function closeAlarm(){
+  if(currentActiveAlarm){
+    dismissedAlarms.add(currentActiveAlarm);
+  }
+  $('alarmModal').classList.add('hidden');
+}
 
 function restoreSession(){
   authToken='';
