@@ -14,13 +14,9 @@ ESP32Time rtc;
 RTC_DS3231 ds3231;
 WiFiServer server(80);
 
-// ============================================================
-// DISPLAY 4 DIGITOS - MULTIPLEXADO DIRECTO, SIN MAX7219
-// Segmentos: A=13, B=14, C=16, D=17, E=18, F=19, G=23
-// Digitos:   DIG0=25, DIG1=26, DIG2=27, DIG3=32
-// El display fisico muestra HH:MM en modo reloj.
-// En modo cronometro: HH:MM si queda >= 1 hora, MM:SS si queda < 1 hora.
-// ============================================================
+// ==========================================
+// SEGMENTOS
+// ==========================================
 const int segA = 13;
 const int segB = 14;
 const int segC = 16;
@@ -29,23 +25,36 @@ const int segE = 18;
 const int segF = 19;
 const int segG = 23;
 
+// ==========================================
+// DIGITOS
+// ==========================================
 const int dig0 = 25;
 const int dig1 = 26;
 const int dig2 = 27;
 const int dig3 = 32;
 
+// ==========================================
+// TABLA DE NÚMEROS (0-9)
+// HIGH = ENCENDIDO, LOW = APAGADO
+// ==========================================
 const byte numeros[10][7] = {
-  {1,1,1,1,1,1,0}, // 0
-  {0,1,1,0,0,0,0}, // 1
-  {1,1,0,1,1,0,1}, // 2
-  {1,1,1,1,0,0,1}, // 3
-  {0,1,1,0,0,1,1}, // 4
-  {1,0,1,1,0,1,1}, // 5
-  {1,0,1,1,1,1,1}, // 6
-  {1,1,1,0,0,0,0}, // 7
-  {1,1,1,1,1,1,1}, // 8
-  {1,1,1,1,0,1,1}  // 9
+  // A, B, C, D, E, F, G
+  {1, 1, 1, 1, 1, 1, 0}, // 0
+  {0, 1, 1, 0, 0, 0, 0}, // 1
+  {1, 1, 0, 1, 1, 0, 1}, // 2
+  {1, 1, 1, 1, 0, 0, 1}, // 3
+  {0, 1, 1, 0, 0, 1, 1}, // 4
+  {1, 0, 1, 1, 0, 1, 1}, // 5
+  {1, 0, 1, 1, 1, 1, 1}, // 6
+  {1, 1, 1, 0, 0, 0, 0}, // 7
+  {1, 1, 1, 1, 1, 1, 1}, // 8
+  {1, 1, 1, 1, 0, 1, 1}  // 9
 };
+
+// Variables para el refresco por multiplexión (Barrido no bloqueante)
+byte digitosBuff[4] = {0, 0, 0, 0};
+byte digitoActualIndex = 0;
+unsigned long ultimoRefrescoMultiplexion = 0;
 
 void apagarDigitos() {
   digitalWrite(dig0, LOW);
@@ -75,50 +84,27 @@ void ponerNumero(byte numero) {
   digitalWrite(segG, numeros[numero][6]);
 }
 
-// Valores que se muestran en los 4 digitos.
-// displayDigitos[0] = izquierda, [3] = derecha.
-byte displayDigitos[4] = {0, 0, 0, 0};
-byte displayActual = 0;
-unsigned long displayAnterior = 0;
-
-void prepararDisplay(byte d3, byte d2, byte d1, byte d0) {
-  displayDigitos[0] = d3;
-  displayDigitos[1] = d2;
-  displayDigitos[2] = d1;
-  displayDigitos[3] = d0;
-}
-
-void refrescarDisplay() {
-  unsigned long ahoraMicros = micros();
-
-  // Cambia de digito cada 2 ms.
-  if (ahoraMicros - displayAnterior < 2000) return;
-  displayAnterior = ahoraMicros;
-
-  // TIEMPO MUERTO: primero se apaga absolutamente todo.
-  // Esto evita el ghosting de los IRF9540/2N3904.
+void mostrarDigito(byte numero, byte digito) {
   apagarDigitos();
   apagarSegmentos();
-  delayMicroseconds(250);
+  delayMicroseconds(50); // Evitar sombras fantasma en multiplexión
 
-  // Se preparan los segmentos con todos los digitos apagados.
-  ponerNumero(displayDigitos[displayActual]);
-  delayMicroseconds(50);
+  ponerNumero(numero);
 
-  // Se enciende solamente el digito correspondiente.
-  if (displayActual == 0) digitalWrite(dig0, HIGH);
-  else if (displayActual == 1) digitalWrite(dig1, HIGH);
-  else if (displayActual == 2) digitalWrite(dig2, HIGH);
-  else digitalWrite(dig3, HIGH);
-
-  displayActual++;
-  if (displayActual >= 4) displayActual = 0;
+  if (digito == 0) digitalWrite(dig0, HIGH);
+  if (digito == 1) digitalWrite(dig1, HIGH);
+  if (digito == 2) digitalWrite(dig2, HIGH);
+  if (digito == 3) digitalWrite(dig3, HIGH);
 }
 
-// Se conserva el nombre para no tocar la logica de la pagina web/remota.
-void actualizarMAX7219();
-
-
+// Barrido de multiplexión rápido en el loop
+void multiplexarDisplay() {
+  if (micros() - ultimoRefrescoMultiplexion >= 2000) { // Refresca cada 2 ms
+    ultimoRefrescoMultiplexion = micros();
+    mostrarDigito(digitosBuff[digitoActualIndex], digitoActualIndex);
+    digitoActualIndex = (digitoActualIndex + 1) % 4;
+  }
+}
 
 long gmtOffset_sec = -10800; // UTC-3 (Argentina)
 
@@ -135,9 +121,6 @@ int proximoId = 1;
 // ============================================================
 // GUARDADO PERMANENTE DE ALARMAS EN LA MEMORIA NVS DEL ESP32
 // ============================================================
-// Las alarmas se guardan en cada alta/baja y se recuperan al
-// iniciar el ESP32. No se borran al resetear o apagar.
-
 void guardarAlarmas() {
   Preferences alarmPrefs;
 
@@ -150,8 +133,6 @@ void guardarAlarmas() {
   alarmPrefs.putUInt("count", cantidad);
   alarmPrefs.putUInt("nextId", (uint32_t)proximoId);
 
-  // Guardamos el vector completo como bytes. Esto evita depender de
-  // muchas claves de texto y hace el guardado más fiable tras un reset.
   if (cantidad > 0) {
     size_t bytes = cantidad * sizeof(Alarma);
     size_t escritos = alarmPrefs.putBytes("data", listaAlarmas.data(), bytes);
@@ -170,10 +151,6 @@ void guardarAlarmas() {
 void cargarAlarmas() {
   Preferences alarmPrefs;
 
-  // Abrimos en modo lectura/escritura.
-  // Si la particion/namespace "alarmas" todavia no existe (primer arranque),
-  // Preferences puede fallar al abrirlo en modo solo lectura.
-  // En modo false el namespace se crea automaticamente.
   if (!alarmPrefs.begin("alarmas", false)) {
     Serial.println("ERROR: No se pudo abrir/crear NVS para cargar alarmas.");
     return;
@@ -213,22 +190,16 @@ void cargarAlarmas() {
 // ============================================================
 // CRONOMETRO / TEMPORIZADOR
 // ============================================================
-// El tiempo se configura desde la pagina. En el display de 4 digitos
-// se muestra MM:SS cuando queda menos de una hora y HH:MM cuando queda
-// una hora o mas. En la pagina siempre se muestra HH:MM:SS.
 uint32_t timerTotalSegundos = 0;
 uint32_t timerRestantesSegundos = 0;
 bool timerCorriendo = false;
 unsigned long timerUltimoTick = 0;
 bool modoCronometro = false;
 
-
 // ============================================================
 // ACCESO REMOTO POR INTERNET
-// El ESP32 inicia las conexiones hacia el servidor, por lo que
-// no hace falta abrir puertos del router.
 // ============================================================
-const char* REMOTE_SERVER_URL = "https://reloj-esp32.onrender.com//api/device";
+const char* REMOTE_SERVER_URL = "https://reloj-esp32.onrender.com/api/device";
 const char* DEVICE_TOKEN = "Franchula2017";
 unsigned long ultimoPollRemoto = 0;
 unsigned long ultimoStateRemoto = 0;
@@ -428,7 +399,7 @@ void actualizarTimer() {
   }
 }
 
-void actualizarMAX7219() {
+void actualizarBufferDisplay() {
   actualizarTimer();
 
   if (modoCronometro) {
@@ -439,19 +410,27 @@ void actualizarMAX7219() {
 
     if (horas > 0) {
       if (horas > 99) horas = 99;
-      prepararDisplay((byte)(horas / 10), (byte)(horas % 10),
-                      (byte)(minutos / 10), (byte)(minutos % 10));
+      digitosBuff[0] = (byte)(horas / 10);
+      digitosBuff[1] = (byte)(horas % 10);
+      digitosBuff[2] = (byte)(minutos / 10);
+      digitosBuff[3] = (byte)(minutos % 10);
     } else {
-      prepararDisplay((byte)(minutos / 10), (byte)(minutos % 10),
-                      (byte)(segundos / 10), (byte)(segundos % 10));
+      digitosBuff[0] = (byte)(minutos / 10);
+      digitosBuff[1] = (byte)(minutos % 10);
+      digitosBuff[2] = (byte)(segundos / 10);
+      digitosBuff[3] = (byte)(segundos % 10);
     }
-  } else {
-    DateTime ahora = ds3231.now();
-    prepararDisplay((byte)(ahora.hour() / 10), (byte)(ahora.hour() % 10),
-                    (byte)(ahora.minute() / 10), (byte)(ahora.minute() % 10));
+    return;
   }
 
-  refrescarDisplay();
+  DateTime ahora = ds3231.now();
+  int h = ahora.hour();
+  int m = ahora.minute();
+
+  digitosBuff[0] = (byte)(h / 10);
+  digitosBuff[1] = (byte)(h % 10);
+  digitosBuff[2] = (byte)(m / 10);
+  digitosBuff[3] = (byte)(m % 10);
 }
 
 // Decodificación de caracteres especiales en URL
@@ -474,7 +453,6 @@ String urlDecode(String input) {
   return decoded;
 }
 
-// Funciones para manejo de múltiples redes en memoria EEPROM/Preferences
 int getNetworkCount() {
   preferences.begin("wifi-list", true);
   int count = preferences.getInt("count", 0);
@@ -781,344 +759,110 @@ const char index_html[] PROGMEM = R"rawliteral(
 
 <body>
 
-<!-- Login / Registro Screen -->
 <div id="loginScreen">
-
     <div class="tab-buttons">
-
-        <button
-            id="tabLogin"
-            class="tab-btn active"
-            onclick="switchTab('login')"
-        >
-            Iniciar Sesión
-        </button>
-
-        <button
-            id="tabRegister"
-            class="tab-btn"
-            onclick="switchTab('register')"
-        >
-            Crear Usuario
-        </button>
-
+        <button id="tabLogin" class="tab-btn active" onclick="switchTab('login')">Iniciar Sesión</button>
+        <button id="tabRegister" class="tab-btn" onclick="switchTab('register')">Crear Usuario</button>
     </div>
 
-    <!-- Formulario Iniciar Sesión -->
     <div id="formLogin" class="form-group">
-
         <h2>🔑 Acceso Directo</h2>
-
         <label>Nombre de Usuario:</label>
-        <input
-            type="text"
-            id="loginUser"
-            placeholder="Tu usuario"
-        >
-
+        <input type="text" id="loginUser" placeholder="Tu usuario">
         <label>Contraseña Personal:</label>
-        <input
-            type="password"
-            id="loginPass"
-            placeholder="Tu contraseña"
-        >
-
+        <input type="password" id="loginPass" placeholder="Tu contraseña">
         <button onclick="loginOnly()">Ingresar</button>
-
     </div>
 
-    <!-- Formulario Crear Usuario -->
     <div id="formRegister" class="form-group hidden">
-
         <h2>📝 Registro Nuevo</h2>
-
         <label>Palabra Clave (Requerida):</label>
-
-        <input
-            type="password"
-            id="tallerKeyInput"
-            placeholder="Ej: taller"
-        >
-
+        <input type="password" id="tallerKeyInput" placeholder="Ej: taller">
         <label>Nombre de Usuario Nuevo:</label>
-
-        <input
-            type="text"
-            id="regUser"
-            placeholder="Escribe un usuario"
-        >
-
+        <input type="text" id="regUser" placeholder="Escribe un usuario">
         <label>Contraseña Personal Nueva:</label>
-
-        <input
-            type="password"
-            id="regPass"
-            placeholder="Escribe tu contraseña"
-        >
-
+        <input type="password" id="regPass" placeholder="Escribe tu contraseña">
         <button onclick="registerOnly()">Crear Cuenta</button>
-
     </div>
 </div>
 
-<!-- Modal Zona Horaria -->
 <div id="countryModal" class="modal hidden">
-
     <div class="modal-card">
-
         <h2>🌎 Zona Horaria</h2>
-
         <div class="form-group" style="margin-top:15px;">
-
             <select id="countrySelect">
-
-                <option value="-10800">
-                    🇦🇷 Argentina / Chile (UTC-3)
-                </option>
-
-                <option value="-18000">
-                    🇨🇴 Colombia / Perú (UTC-5)
-                </option>
-
-                <option value="-21600">
-                    🇲🇽 México CDMX (UTC-6)
-                </option>
-
-                <option value="3600">
-                    🇪🇸 España (UTC+1)
-                </option>
-
+                <option value="-10800">🇦🇷 Argentina / Chile (UTC-3)</option>
+                <option value="-18000">🇨🇴 Colombia / Perú (UTC-5)</option>
+                <option value="-21600">🇲🇽 México CDMX (UTC-6)</option>
+                <option value="3600">🇪🇸 España (UTC+1)</option>
             </select>
-
-            <button onclick="confirmCountry()">
-                Acceder al Reloj
-            </button>
-
+            <button onclick="confirmCountry()">Acceder al Reloj</button>
         </div>
     </div>
 </div>
 
-<!-- Modal Interactivo / Notificaciones -->
 <div id="customModal" class="modal hidden">
-
     <div class="modal-card">
-
         <h3 id="modalTitle">Notificación</h3>
-
         <p id="modalMessage">Mensaje de prueba</p>
-
-        <div
-            id="modalInputs"
-            class="form-group hidden"
-            style="margin-bottom: 15px;"
-        >
-
-            <label id="modalInputLabel">
-                Contraseña personal requerida:
-            </label>
-
-            <input
-                type="password"
-                id="modalSecretInput"
-                placeholder="Tu contraseña"
-            >
-
+        <div id="modalInputs" class="form-group hidden" style="margin-bottom: 15px;">
+            <label id="modalInputLabel">Contraseña personal requerida:</label>
+            <input type="password" id="modalSecretInput" placeholder="Tu contraseña">
         </div>
-
         <div style="display:flex; gap:10px; justify-content:center;">
-
-            <button id="modalBtnConfirm">
-                Aceptar
-            </button>
-
-            <button
-                id="modalBtnCancel"
-                class="btn-outline hidden"
-                onclick="closeNotification()"
-            >
-                Cancelar
-            </button>
-
+            <button id="modalBtnConfirm">Aceptar</button>
+            <button id="modalBtnCancel" class="btn-outline hidden" onclick="closeNotification()">Cancelar</button>
         </div>
     </div>
 </div>
 
-<!-- Modal Alarma Sonando -->
 <div id="alarmTriggerModal" class="modal hidden">
-
     <div class="modal-card alarm-trigger-card">
-
-        <h3 style="font-size: 1.8rem;">
-            ⏰ ¡ALARMA!
-        </h3>
-
-        <div
-            class="clock-display"
-            id="alarmTriggerTime"
-        >
-            --:--
-        </div>
-
-        <p>
-            Es hora de la alarma programada.
-        </p>
-
-        <button
-            onclick="dismissAlarmTrigger()"
-            style="font-size: 1.1rem; padding: 15px;"
-        >
-            🔔 DESACTIVAR ALARMA
-        </button>
-
+        <h3 style="font-size: 1.8rem;">⏰ ¡ALARMA!</h3>
+        <div class="clock-display" id="alarmTriggerTime">--:--</div>
+        <p>Es hora de la alarma programada.</p>
+        <button onclick="dismissAlarmTrigger()" style="font-size: 1.1rem; padding: 15px;">🔔 DESACTIVAR ALARMA</button>
     </div>
 </div>
 
-<!-- Dashboard -->
 <div id="dashboard" class="dashboard-container hidden">
 
-    <!-- Reloj -->
     <div class="card">
-
         <h2 id="mainModeTitle">⏱️ Hora del Reloj</h2>
-
         <div id="mainModeBadge" style="text-align:center; color:#aaa; font-size:.85rem; margin-top:-5px;">🕐 MODO RELOJ</div>
-
-        <div
-            class="clock-display"
-            id="clock"
-        >
-            --:--:--
-        </div>
-
-        <button
-            class="btn-outline"
-            onclick="syncWithDevice()"
-        >
-            Sincronizar Celular
-        </button>
-
+        <div class="clock-display" id="clock">--:--:--</div>
+        <button class="btn-outline" onclick="syncWithDevice()">Sincronizar Celular</button>
     </div>
 
-    <!-- Ajuste Manual -->
     <div class="card">
-
         <h2>⚙️ Ajustar Hora del Reloj</h2>
-
         <div class="form-group">
-
-            <label>
-                Selecciona Fecha y Hora exacta:
-            </label>
-
-            <input
-                type="datetime-local"
-                id="manualDateTime"
-            >
-
-            <button onclick="setManualTime()">
-                Establecer Hora
-            </button>
-
+            <label>Selecciona Fecha y Hora exacta:</label>
+            <input type="datetime-local" id="manualDateTime">
+            <button onclick="setManualTime()">Establecer Hora</button>
         </div>
     </div>
 
-    <!-- Gestor de Redes Wi-Fi -->
     <div class="card">
-
         <h2>📶 Gestor de Redes Wi-Fi</h2>
-
-        <!-- RED WI-FI ACTUAL - CARTEL PEQUEÑO -->
-        <div
-            style="
-                background:#080808;
-                border:1px solid #222;
-                padding:10px;
-                border-radius:8px;
-                display:flex;
-                justify-content:space-between;
-                align-items:center;
-                gap:10px;
-                margin-bottom:15px;
-            "
-        >
-
-            <span
-                style="
-                    color:#aaa;
-                    font-size:0.85rem;
-                "
-            >
-                📶 Conectado a:
-            </span>
-
-            <span
-                id="currentWifi"
-                style="
-                    color:var(--yellow-main);
-                    font-size:0.9rem;
-                    font-weight:bold;
-                    text-align:right;
-                    word-break:break-word;
-                "
-            >
-                Cargando...
-            </span>
-
+        <div style="background:#080808; border:1px solid #222; padding:10px; border-radius:8px; display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:15px;">
+            <span style="color:#aaa; font-size:0.85rem;">📶 Conectado a:</span>
+            <span id="currentWifi" style="color:var(--yellow-main); font-size:0.9rem; font-weight:bold; text-align:right; word-break:break-word;">Cargando...</span>
         </div>
-
         <div class="form-group">
-
-            <label>
-                Guardar Nueva Red Wi-Fi:
-            </label>
-
-            <input
-                type="text"
-                id="wifiSSID"
-                placeholder="SSID (Nombre)"
-            >
-
-            <input
-                type="password"
-                id="wifiPASS"
-                placeholder="Contraseña de la Red"
-            >
-
-            <button onclick="requestAddWifi()">
-                Agregar Red
-            </button>
-
+            <label>Guardar Nueva Red Wi-Fi:</label>
+            <input type="text" id="wifiSSID" placeholder="SSID (Nombre)">
+            <input type="password" id="wifiPASS" placeholder="Contraseña de la Red">
+            <button onclick="requestAddWifi()">Agregar Red</button>
         </div>
-
-        <hr
-            style="
-                border-color: var(--border-color);
-                margin: 15px 0;
-            "
-        >
-
-        <label>
-            Redes Guardadas:
-        </label>
-
-        <div
-            id="wifiContainer"
-            style="
-                max-height: 150px;
-                overflow-y: auto;
-                margin-top: 5px;
-            "
-        ></div>
-
+        <hr style="border-color: var(--border-color); margin: 15px 0;">
+        <label>Redes Guardadas:</label>
+        <div id="wifiContainer" style="max-height: 150px; overflow-y: auto; margin-top: 5px;"></div>
     </div>
 
-    <!-- Cronometro -->
     <div class="card">
-
         <h2>⏱️ Cronómetro / Temporizador</h2>
-
         <div class="clock-display" id="timerDisplay">00:00:00</div>
-
         <div class="form-group">
             <label>Tiempo a configurar:</label>
             <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -1127,56 +871,32 @@ const char index_html[] PROGMEM = R"rawliteral(
                 <input type="number" id="timerSeconds" min="0" max="59" value="0" placeholder="Segundos" style="flex:1; min-width:90px;">
             </div>
         </div>
-
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
             <button onclick="timerStart()">▶️ Iniciar</button>
             <button onclick="timerPause()">⏸️ Pausar</button>
             <button onclick="timerReset()">🔄 Reiniciar</button>
         </div>
-
         <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px;">
             <button class="btn-outline" onclick="setDisplayMode('clock')">🕐 Modo Reloj</button>
             <button class="btn-outline" onclick="setDisplayMode('timer')">⏱️ Modo Cronómetro</button>
         </div>
-
         <p style="color:#aaa; margin-top:10px; font-size:.85rem;">
             El reloj físico mostrará el modo elegido. En cronómetro: MM:SS; si queda una hora o más, HH:MM.
         </p>
     </div>
 
-    <!-- Alarmas -->
     <div class="card">
-
         <h2>⏰ Programar Alarmas</h2>
-
         <div class="form-group">
-
-            <input
-                type="time"
-                id="alarmInput"
-            >
-
-            <button onclick="addAlarm()">
-                Agregar Alarma
-            </button>
-
+            <input type="time" id="alarmInput">
+            <button onclick="addAlarm()">Agregar Alarma</button>
         </div>
-
-        <div
-            id="alarmContainer"
-            style="
-                max-height: 150px;
-                overflow-y: auto;
-                margin-top: 10px;
-            "
-        ></div>
-
+        <div id="alarmContainer" style="max-height: 150px; overflow-y: auto; margin-top: 10px;"></div>
     </div>
 
 </div>
 
 <script>
-
     let authHeader = "";
     let userPassword = "";
     let confirmCallback = null;
@@ -1185,83 +905,44 @@ const char index_html[] PROGMEM = R"rawliteral(
     let timerPoll = null;
 
     function switchTab(tab) {
-
         if(tab === 'login') {
-
-            document.getElementById('tabLogin')
-                .classList.add('active');
-
-            document.getElementById('tabRegister')
-                .classList.remove('active');
-
-            document.getElementById('formLogin')
-                .classList.remove('hidden');
-
-            document.getElementById('formRegister')
-                .classList.add('hidden');
-
+            document.getElementById('tabLogin').classList.add('active');
+            document.getElementById('tabRegister').classList.remove('active');
+            document.getElementById('formLogin').classList.remove('hidden');
+            document.getElementById('formRegister').classList.add('hidden');
         } else {
-
-            document.getElementById('tabRegister')
-                .classList.add('active');
-
-            document.getElementById('tabLogin')
-                .classList.remove('active');
-
-            document.getElementById('formRegister')
-                .classList.remove('hidden');
-
-            document.getElementById('formLogin')
-                .classList.add('hidden');
+            document.getElementById('tabRegister').classList.add('active');
+            document.getElementById('tabLogin').classList.remove('active');
+            document.getElementById('formRegister').classList.remove('hidden');
+            document.getElementById('formLogin').classList.add('hidden');
         }
     }
 
     function showAuthDialog(title, message, callback) {
-
         document.getElementById('modalTitle').innerText = title;
         document.getElementById('modalMessage').innerText = message;
-
-        document.getElementById('modalInputs')
-            .classList.remove('hidden');
-
-        document.getElementById('modalBtnCancel')
-            .classList.remove('hidden');
-
+        document.getElementById('modalInputs').classList.remove('hidden');
+        document.getElementById('modalBtnCancel').classList.remove('hidden');
         document.getElementById('modalSecretInput').value = '';
-
         confirmCallback = callback;
-
-        document.getElementById('customModal')
-            .classList.remove('hidden');
+        document.getElementById('customModal').classList.remove('hidden');
     }
 
     function showNotification(title, message) {
-
         document.getElementById('modalTitle').innerText = title;
         document.getElementById('modalMessage').innerText = message;
-
-        document.getElementById('modalInputs')
-            .classList.add('hidden');
-
-        document.getElementById('modalBtnCancel')
-            .classList.add('hidden');
-
+        document.getElementById('modalInputs').classList.add('hidden');
+        document.getElementById('modalBtnCancel').classList.add('hidden');
         confirmCallback = null;
-
-        document.getElementById('customModal')
-            .classList.remove('hidden');
+        document.getElementById('customModal').classList.remove('hidden');
     }
 
     function closeNotification() {
-        document.getElementById('customModal')
-            .classList.add('hidden');
+        document.getElementById('customModal').classList.add('hidden');
     }
 
     document.getElementById('modalBtnConfirm').onclick = function() {
-
-        const pass =
-            document.getElementById('modalSecretInput').value;
-
+        const pass = document.getElementById('modalSecretInput').value;
         if (confirmCallback) {
             confirmCallback(pass);
         } else {
@@ -1270,155 +951,67 @@ const char index_html[] PROGMEM = R"rawliteral(
     };
 
     function loginOnly() {
-
-        const u =
-            document.getElementById('loginUser').value;
-
-        const p =
-            document.getElementById('loginPass').value;
-
-        if(!u || !p) {
-
-            return showNotification(
-                "Campos Incompletos",
-                "Por favor ingresa tu usuario y contraseña."
-            );
-        }
+        const u = document.getElementById('loginUser').value;
+        const p = document.getElementById('loginPass').value;
+        if(!u || !p) return showNotification("Campos Incompletos", "Por favor ingresa tu usuario y contraseña.");
 
         userPassword = p;
-        authHeader =
-            'Basic ' + btoa(u + ':' + p);
+        authHeader = 'Basic ' + btoa(u + ':' + p);
 
-        fetch(
-            `/login-user?user=${encodeURIComponent(u)}&pass=${encodeURIComponent(p)}`
-        )
+        fetch(`/login-user?user=${encodeURIComponent(u)}&pass=${encodeURIComponent(p)}`)
         .then(res => res.text())
         .then(resText => {
-
             if(resText.trim() === "OK") {
-
-                document.getElementById('loginScreen')
-                    .classList.add('hidden');
-
-                document.getElementById('countryModal')
-                    .classList.remove('hidden');
-
+                document.getElementById('loginScreen').classList.add('hidden');
+                document.getElementById('countryModal').classList.remove('hidden');
             } else {
-
-                showNotification(
-                    "Acceso Denegado",
-                    "Usuario o contraseña incorrectos."
-                );
+                showNotification("Acceso Denegado", "Usuario o contraseña incorrectos.");
             }
-
         })
-        .catch(() =>
-            showNotification(
-                "Error",
-                "No se pudo conectar con el ESP32."
-            )
-        );
+        .catch(() => showNotification("Error", "No se pudo conectar con el ESP32."));
     }
 
     function registerOnly() {
-
-        const key =
-            document.getElementById('tallerKeyInput').value;
-
-        const u =
-            document.getElementById('regUser').value;
-
-        const p =
-            document.getElementById('regPass').value;
-
-        if(!key || !u || !p) {
-
-            return showNotification(
-                "Campos Incompletos",
-                "Debes completar la palabra clave, el nuevo usuario y la contraseña."
-            );
-        }
+        const key = document.getElementById('tallerKeyInput').value;
+        const u = document.getElementById('regUser').value;
+        const p = document.getElementById('regPass').value;
+        if(!key || !u || !p) return showNotification("Campos Incompletos", "Debes completar todos los campos.");
 
         userPassword = p;
-        authHeader =
-            'Basic ' + btoa(u + ':' + p);
+        authHeader = 'Basic ' + btoa(u + ':' + p);
 
-        fetch(
-            `/register-user?key=${encodeURIComponent(key)}&user=${encodeURIComponent(u)}&pass=${encodeURIComponent(p)}`
-        )
+        fetch(`/register-user?key=${encodeURIComponent(key)}&user=${encodeURIComponent(u)}&pass=${encodeURIComponent(p)}`)
         .then(res => res.text())
         .then(resText => {
-
             if(resText.trim() === "OK") {
-
-                document.getElementById('loginScreen')
-                    .classList.add('hidden');
-
-                document.getElementById('countryModal')
-                    .classList.remove('hidden');
-
+                document.getElementById('loginScreen').classList.add('hidden');
+                document.getElementById('countryModal').classList.remove('hidden');
             } else if(resText.trim() === "WRONG_KEY") {
-
-                showNotification(
-                    "Palabra Clave Incorrecta",
-                    "La palabra clave introducida es errónea."
-                );
-
+                showNotification("Palabra Clave Incorrecta", "La palabra clave introducida es errónea.");
             } else {
-
-                showNotification(
-                    "Usuario Existente",
-                    "Ese usuario ya existe con otra contraseña."
-                );
+                showNotification("Usuario Existente", "Ese usuario ya existe con otra contraseña.");
             }
-
         })
-        .catch(() =>
-            showNotification(
-                "Error",
-                "No se pudo conectar con el ESP32."
-            )
-        );
+        .catch(() => showNotification("Error", "No se pudo conectar con el ESP32."));
     }
 
     function confirmCountry() {
-
-        const offset =
-            document.getElementById('countrySelect').value;
-
-        fetch(
-            '/set-timezone?offset=' + offset,
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        const offset = document.getElementById('countrySelect').value;
+        fetch('/set-timezone?offset=' + offset, { headers: { 'Authorization': authHeader } })
         .then(() => {
-
-            document.getElementById('countryModal')
-                .classList.add('hidden');
-
-            document.getElementById('dashboard')
-                .classList.remove('hidden');
-
+            document.getElementById('countryModal').classList.add('hidden');
+            document.getElementById('dashboard').classList.remove('hidden');
             syncWithDevice();
-
             setInterval(getESPTime, 1000);
             timerPoll = setInterval(loadTimer, 1000);
-
             loadAlarms();
             loadTimer();
             loadNetworks();
-
-            // NUEVO: cargar la red Wi-Fi actual
             loadCurrentWifi();
         });
     }
 
     function getESPTime() {
-        // Cada modo tiene su propia fuente de datos.
-        // Si estamos en cronometro, NO consultamos ni mostramos la hora del reloj.
         fetch('/get-timer', {headers:{'Authorization':authHeader}})
             .then(res => res.json())
             .then(timerState => {
@@ -1427,8 +1020,6 @@ const char index_html[] PROGMEM = R"rawliteral(
                     actualizarModoPagina('timer', timerState.display);
                     return;
                 }
-
-                // Solo en MODO RELOJ se consulta el DS3231.
                 return fetch('/get-time', {headers:{'Authorization':authHeader}})
                     .then(res => res.text())
                     .then(t => {
@@ -1442,361 +1033,136 @@ const char index_html[] PROGMEM = R"rawliteral(
             .catch(() => {});
     }
 
-    // NUEVO: MOSTRAR LA RED WI-FI ACTUAL
     function loadCurrentWifi() {
-
-        fetch(
-            '/get-current-network',
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        fetch('/get-current-network', { headers: { 'Authorization': authHeader } })
         .then(res => res.text())
         .then(ssid => {
-
-            const wifiElement =
-                document.getElementById('currentWifi');
-
-            if (ssid && ssid.trim() !== '') {
-
-                wifiElement.innerText =
-                    ssid.trim();
-
-            } else {
-
-                wifiElement.innerText =
-                    'Sin conexión Wi-Fi';
-            }
-
+            const wifiElement = document.getElementById('currentWifi');
+            wifiElement.innerText = (ssid && ssid.trim() !== '') ? ssid.trim() : 'Sin conexión Wi-Fi';
         })
-        .catch(() => {
-
-            document.getElementById('currentWifi')
-                .innerText = 'No disponible';
-        });
+        .catch(() => { document.getElementById('currentWifi').innerText = 'No disponible'; });
     }
 
     function checkAlarmTrigger(currentTimeStr) {
+        const currentHM = currentTimeStr.substring(0, 5);
+        const seconds = currentTimeStr.substring(6, 8);
 
-        const currentHM =
-            currentTimeStr.substring(0, 5);
-
-        const seconds =
-            currentTimeStr.substring(6, 8);
-
-        if (
-            seconds === "00" &&
-            currentHM !== lastTriggeredMinute
-        ) {
-
+        if (seconds === "00" && currentHM !== lastTriggeredMinute) {
             activeAlarms.forEach(al => {
-
-                const h =
-                    String(al.hora).padStart(2, '0');
-
-                const m =
-                    String(al.minuto).padStart(2, '0');
-
+                const h = String(al.hora).padStart(2, '0');
+                const m = String(al.minuto).padStart(2, '0');
                 if(`${h}:${m}` === currentHM) {
-
-                    lastTriggeredMinute =
-                        currentHM;
-
-                    document.getElementById(
-                        'alarmTriggerTime'
-                    ).innerText = `${h}:${m}`;
-
-                    document.getElementById(
-                        'alarmTriggerModal'
-                    ).classList.remove('hidden');
+                    lastTriggeredMinute = currentHM;
+                    document.getElementById('alarmTriggerTime').innerText = `${h}:${m}`;
+                    document.getElementById('alarmTriggerModal').classList.remove('hidden');
                 }
             });
         }
     }
 
     function dismissAlarmTrigger() {
-
-        document.getElementById(
-            'alarmTriggerModal'
-        ).classList.add('hidden');
+        document.getElementById('alarmTriggerModal').classList.add('hidden');
     }
 
     function setManualTime() {
+        const val = document.getElementById('manualDateTime').value;
+        if (!val) return showNotification("Fecha Inválida", "Selecciona una fecha y hora válidas.");
 
-        const val =
-            document.getElementById('manualDateTime').value;
-
-        if (!val) {
-
-            return showNotification(
-                "Fecha Inválida",
-                "Selecciona una fecha y hora válidas."
-            );
-        }
-
-        const epoch =
-            Math.floor(
-                new Date(val).getTime() / 1000
-            );
-
-        fetch(
-            '/set-time?epoch=' + epoch,
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        const epoch = Math.floor(new Date(val).getTime() / 1000);
+        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } })
         .then(() => {
-
-            showNotification(
-                "✅ Hora Ajustada",
-                "La hora del ESP32 se actualizó con éxito."
-            );
-
+            showNotification("✅ Hora Ajustada", "La hora del ESP32 se actualizó con éxito.");
             getESPTime();
         });
     }
 
     function loadNetworks() {
-
-        fetch(
-            '/get-networks',
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        fetch('/get-networks', { headers: { 'Authorization': authHeader } })
         .then(res => res.json())
         .then(networks => {
-
-            const c =
-                document.getElementById('wifiContainer');
-
+            const c = document.getElementById('wifiContainer');
             c.innerHTML = '';
-
             if(networks.length === 0) {
-
-                c.innerHTML =
-                    '<p style="color:#666; font-size:0.85rem;">No hay redes guardadas.</p>';
-
+                c.innerHTML = '<p style="color:#666; font-size:0.85rem;">No hay redes guardadas.</p>';
                 return;
             }
-
             networks.forEach(net => {
-
                 c.innerHTML += `
                     <div class="item-list">
-
-                        <span>
-                            📶 ${net.ssid}
-                        </span>
-
+                        <span>📶 ${net.ssid}</span>
                         <div>
-
-                            <button
-                                class="btn-small btn-outline"
-                                onclick="requestConnectWifi(${net.id})"
-                            >
-                                Conectar
-                            </button>
-
-                            <button
-                                class="btn-small btn-danger"
-                                onclick="requestDelWifi(${net.id})"
-                            >
-                                Borrar
-                            </button>
-
+                            <button class="btn-small btn-outline" onclick="requestConnectWifi(${net.id})">Conectar</button>
+                            <button class="btn-small btn-danger" onclick="requestDelWifi(${net.id})">Borrar</button>
                         </div>
-
                     </div>`;
             });
         });
     }
 
     function requestAddWifi() {
+        const s = document.getElementById('wifiSSID').value;
+        const p = document.getElementById('wifiPASS').value;
+        if(!s || !p) return showNotification("Campos Incompletos", "Por favor ingresa SSID y Contraseña.");
 
-        const s =
-            document.getElementById('wifiSSID').value;
-
-        const p =
-            document.getElementById('wifiPASS').value;
-
-        if(!s || !p) {
-
-            return showNotification(
-                "Campos Incompletos",
-                "Por favor ingresa SSID y Contraseña."
-            );
-        }
-
-        showAuthDialog(
-            "🔒 Verificación Requerida",
-            "Ingresa tu contraseña personal para guardar la nueva red:",
-            (pass) => {
-
-                if(pass === userPassword) {
-
-                    fetch(
-                        `/add-wifi?ssid=${encodeURIComponent(s)}&pass=${encodeURIComponent(p)}`,
-                        {
-                            headers: {
-                                'Authorization': authHeader
-                            }
-                        }
-                    )
-                    .then(() => {
-
-                        closeNotification();
-
-                        document.getElementById(
-                            'wifiSSID'
-                        ).value = '';
-
-                        document.getElementById(
-                            'wifiPASS'
-                        ).value = '';
-
-                        loadNetworks();
-
-                        showNotification(
-                            "✅ Red Guardada",
-                            "La red Wi-Fi fue agregada correctamente."
-                        );
-                    });
-
-                } else {
-
-                    showNotification(
-                        "Acceso Denegado",
-                        "Contraseña personal incorrecta."
-                    );
-                }
+        showAuthDialog("🔒 Verificación Requerida", "Ingresa tu contraseña personal para guardar la nueva red:", (pass) => {
+            if(pass === userPassword) {
+                fetch(`/add-wifi?ssid=${encodeURIComponent(s)}&pass=${encodeURIComponent(p)}`, { headers: { 'Authorization': authHeader } })
+                .then(() => {
+                    closeNotification();
+                    document.getElementById('wifiSSID').value = '';
+                    document.getElementById('wifiPASS').value = '';
+                    loadNetworks();
+                    showNotification("✅ Red Guardada", "La red Wi-Fi fue agregada correctamente.");
+                });
+            } else {
+                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
             }
-        );
+        });
     }
 
     function requestConnectWifi(id) {
-
-        showAuthDialog(
-            "🔒 Autorizar Cambio de Red",
-            "Ingresa tu contraseña personal para conectar a esta red:",
-            (pass) => {
-
-                if(pass === userPassword) {
-
-                    fetch(
-                        `/connect-wifi?id=${id}`,
-                        {
-                            headers: {
-                                'Authorization': authHeader
-                            }
-                        }
-                    )
-                    .then(() => {
-
-                        closeNotification();
-
-                        showNotification(
-                            "🔄 Conectando...",
-                            "El ESP32 se está reiniciando para conectarse a la red seleccionada."
-                        );
-                    });
-
-                } else {
-
-                    showNotification(
-                        "Acceso Denegado",
-                        "Contraseña personal incorrecta."
-                    );
-                }
+        showAuthDialog("🔒 Autorizar Cambio de Red", "Ingresa tu contraseña personal para conectar a esta red:", (pass) => {
+            if(pass === userPassword) {
+                fetch(`/connect-wifi?id=${id}`, { headers: { 'Authorization': authHeader } })
+                .then(() => {
+                    closeNotification();
+                    showNotification("🔄 Conectando...", "El ESP32 se está reiniciando para conectarse.");
+                });
+            } else {
+                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
             }
-        );
+        });
     }
 
     function requestDelWifi(id) {
-
-        showAuthDialog(
-            "🔒 Autorizar Eliminación",
-            "Ingresa tu contraseña personal para borrar la red:",
-            (pass) => {
-
-                if(pass === userPassword) {
-
-                    fetch(
-                        `/del-wifi?id=${id}`,
-                        {
-                            headers: {
-                                'Authorization': authHeader
-                            }
-                        }
-                    )
-                    .then(() => {
-
-                        closeNotification();
-
-                        loadNetworks();
-
-                        showNotification(
-                            "🗑️ Eliminada",
-                            "Red eliminada de la lista."
-                        );
-                    });
-
-                } else {
-
-                    showNotification(
-                        "Acceso Denegado",
-                        "Contraseña personal incorrecta."
-                    );
-                }
+        showAuthDialog("🔒 Autorizar Eliminación", "Ingresa tu contraseña personal para borrar la red:", (pass) => {
+            if(pass === userPassword) {
+                fetch(`/del-wifi?id=${id}`, { headers: { 'Authorization': authHeader } })
+                .then(() => {
+                    closeNotification();
+                    loadNetworks();
+                    showNotification("🗑️ Eliminada", "Red eliminada de la lista.");
+                });
+            } else {
+                showNotification("Acceso Denegado", "Contraseña personal incorrecta.");
             }
-        );
+        });
     }
 
     function syncWithDevice() {
-
-        const epoch =
-            Math.floor(Date.now() / 1000);
-
-        fetch(
-            '/set-time?epoch=' + epoch,
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        const epoch = Math.floor(Date.now() / 1000);
+        fetch('/set-time?epoch=' + epoch, { headers: { 'Authorization': authHeader } })
         .then(() => getESPTime());
     }
 
-    function timerSet() {
-        const h = Math.max(0, Math.min(99, parseInt(document.getElementById('timerHours').value || 0)));
-        const m = Math.max(0, Math.min(59, parseInt(document.getElementById('timerMinutes').value || 0)));
-        const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('timerSeconds').value || 0)));
-        fetch(`/timer-set?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}})
-            .then(r => r.text())
-            .then(() => setDisplayMode('timer'))
-            .catch(() => showNotification('Error', 'No se pudo configurar el cronómetro.'));
-    }
-
     function timerStart() {
-        // Al iniciar, toma directamente el tiempo escrito en los campos.
-        // Ya no hace falta un boton separado de "Configurar".
         const h = Math.max(0, Math.min(99, parseInt(document.getElementById('timerHours').value || 0)));
         const m = Math.max(0, Math.min(59, parseInt(document.getElementById('timerMinutes').value || 0)));
         const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('timerSeconds').value || 0)));
 
         fetch(`/timer-start?h=${h}&m=${m}&s=${sec}`, {headers:{'Authorization':authHeader}})
             .then(r => r.text())
-            .then(() => {
-                setDisplayMode('timer');
-                loadTimer();
-            })
+            .then(() => { setDisplayMode('timer'); loadTimer(); })
             .catch(() => showNotification('Error', 'No se pudo iniciar el cronómetro.'));
     }
 
@@ -1830,7 +1196,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
 
     function setDisplayMode(mode) {
-        // Cambiamos inmediatamente la interfaz para que no dependa del polling.
         if (mode === 'timer') {
             actualizarModoPagina('timer');
         } else {
@@ -1866,185 +1231,81 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
 
     function loadAlarms() {
-
-        fetch(
-            '/get-alarms',
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        fetch('/get-alarms', { headers: { 'Authorization': authHeader } })
         .then(res => res.json())
         .then(alarms => {
-
             activeAlarms = alarms;
-
-            const c =
-                document.getElementById('alarmContainer');
-
+            const c = document.getElementById('alarmContainer');
             c.innerHTML = '';
-
             alarms.forEach(al => {
-
-                const h =
-                    String(al.hora).padStart(2, '0');
-
-                const m =
-                    String(al.minuto).padStart(2, '0');
-
+                const h = String(al.hora).padStart(2, '0');
+                const m = String(al.minuto).padStart(2, '0');
                 c.innerHTML += `
                     <div class="item-list">
-
-                        <span>
-                            ⏰ ${h}:${m} hs
-                        </span>
-
-                        <button
-                            class="btn-small btn-danger"
-                            onclick="deleteAlarm(${al.id})"
-                        >
-                            Borrar
-                        </button>
-
+                        <span>⏰ ${h}:${m} hs</span>
+                        <button class="btn-small btn-danger" onclick="deleteAlarm(${al.id})">Borrar</button>
                     </div>`;
             });
         });
     }
 
     function addAlarm() {
+        const val = document.getElementById('alarmInput').value;
+        if(!val) return showNotification("Hora requerida", "Selecciona un horario para la alarma.");
 
-        const val =
-            document.getElementById('alarmInput').value;
-
-        if(!val) {
-
-            return showNotification(
-                "Hora requerida",
-                "Selecciona un horario para la alarma."
-            );
-        }
-
-        fetch(
-            '/add-alarm?time=' + val,
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        fetch('/add-alarm?time=' + val, { headers: { 'Authorization': authHeader } })
         .then(() => loadAlarms());
     }
 
     function deleteAlarm(id) {
-
-        fetch(
-            '/del-alarm?id=' + id,
-            {
-                headers: {
-                    'Authorization': authHeader
-                }
-            }
-        )
+        fetch('/del-alarm?id=' + id, { headers: { 'Authorization': authHeader } })
         .then(() => loadAlarms());
     }
-
 </script>
 
 </body>
 </html>
 )rawliteral";
 
-
 void iniciarModoDual() {
-
-  Serial.println(
-    "\n--- Activando Modo Dual (AP + STA) ---"
-  );
-
+  Serial.println("\n--- Activando Modo Dual (AP + STA) ---");
   WiFi.mode(WIFI_AP_STA);
-
-  WiFi.softAP(
-    "ESP32-Reloj-Config",
-    "12345678"
-  );
-
-  Serial.print(
-    "Punto de acceso permanente activo: http://"
-  );
-
+  WiFi.softAP("ESP32-Reloj-Config", "12345678");
+  Serial.print("Punto de acceso permanente activo: http://");
   Serial.println(WiFi.softAPIP());
 }
 
-
 bool conectarWifiPorIndice(int index) {
-
-  preferences.begin(
-    "wifi-list",
-    true
-  );
-
-  String target_ssid =
-      preferences.getString(
-        ("ssid_" + String(index)).c_str(),
-        ""
-      );
-
-  String target_pass =
-      preferences.getString(
-        ("pass_" + String(index)).c_str(),
-        ""
-      );
-
+  preferences.begin("wifi-list", true);
+  String target_ssid = preferences.getString(("ssid_" + String(index)).c_str(), "");
+  String target_pass = preferences.getString(("pass_" + String(index)).c_str(), "");
   preferences.end();
 
-  if (target_ssid == "")
-    return false;
+  if (target_ssid == "") return false;
 
   WiFi.persistent(false);
-
   iniciarModoDual();
-
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  Serial.printf(
-    "Conectando a red [%s]...\n",
-    target_ssid.c_str()
-  );
-
-  WiFi.begin(
-    target_ssid.c_str(),
-    target_pass.c_str()
-  );
+  Serial.printf("Conectando a red [%s]...\n", target_ssid.c_str());
+  WiFi.begin(target_ssid.c_str(), target_pass.c_str());
 
   int intentos = 0;
-
-  while (
-    WiFi.status() != WL_CONNECTED &&
-    intentos < 20
-  ) {
-
+  while (WiFi.status() != WL_CONNECTED && intentos < 20) {
     delay(500);
-
     Serial.print(".");
-
     intentos++;
   }
 
-  return (
-    WiFi.status() == WL_CONNECTED
-  );
+  return (WiFi.status() == WL_CONNECTED);
 }
 
-
 void setup() {
-
   Serial.begin(115200);
-
   delay(1000);
 
-  // DISPLAY DIRECTO - MULTIPLEXADO
+  // Configuracion de Segmentos
   pinMode(segA, OUTPUT);
   pinMode(segB, OUTPUT);
   pinMode(segC, OUTPUT);
@@ -2053,6 +1314,7 @@ void setup() {
   pinMode(segF, OUTPUT);
   pinMode(segG, OUTPUT);
 
+  // Configuracion de Digitos
   pinMode(dig0, OUTPUT);
   pinMode(dig1, OUTPUT);
   pinMode(dig2, OUTPUT);
@@ -2075,619 +1337,202 @@ void setup() {
     }
 
     DateTime ahora = ds3231.now();
-
-    // Cargar la hora del DS3231 tambien en el reloj interno del ESP32.
     rtc.setTime(ahora.unixtime());
-
-    Serial.printf("Hora DS3231: %02d:%02d:%02d\n",
-                  ahora.hour(), ahora.minute(), ahora.second());
+    Serial.printf("Hora DS3231: %02d:%02d:%02d\n", ahora.hour(), ahora.minute(), ahora.second());
   }
 
-  // Recuperar las alarmas guardadas antes de iniciar el servidor.
   cargarAlarmas();
 
-  int totalRedes =
-      getNetworkCount();
-
+  int totalRedes = getNetworkCount();
   if (totalRedes > 0) {
-
-    Serial.printf(
-      "\nSe encontraron %d redes Wi-Fi guardadas.\n",
-      totalRedes
-    );
-
+    Serial.printf("\nSe encontraron %d redes Wi-Fi guardadas.\n", totalRedes);
     if (conectarWifiPorIndice(0)) {
+      Serial.println("\n🎉 ¡CONECTADO EXITOSAMENTE!");
+      Serial.print("IP asignada: http://");
+      Serial.println(WiFi.localIP());
 
-      Serial.println(
-        "\n🎉 ¡CONECTADO EXITOSAMENTE!"
-      );
-
-      Serial.print(
-        "IP asignada: http://"
-      );
-
-      Serial.println(
-        WiFi.localIP()
-      );
-      // antes era mireloj.local
       if (MDNS.begin("reloj")) {
-  MDNS.addService("http", "tcp", 80);
-  Serial.println("Dominio local activo: http://reloj.local");
-}
-
+        MDNS.addService("http", "tcp", 80);
+        Serial.println("Dominio local activo: http://reloj.local");
+      }
     } else {
-
-      Serial.println(
-        "\n❌ No se pudo conectar a la red predeterminada."
-      );
+      Serial.println("\n❌ No se pudo conectar a la red predeterminada.");
     }
-
   } else {
-
-    Serial.println(
-      "No hay redes Wi-Fi guardadas."
-    );
-
+    Serial.println("No hay redes Wi-Fi guardadas.");
     iniciarModoDual();
   }
 
   server.begin();
-  actualizarMAX7219();
+  actualizarBufferDisplay();
 }
 
-
 void loop() {
-
-  actualizarMAX7219();
+  actualizarBufferDisplay();
+  multiplexarDisplay();
   servicioRemoto();
 
-  WiFiClient client =
-      server.available();
+  WiFiClient client = server.available();
 
   if (client) {
-
     String currentLine = "";
     String requestHeader = "";
 
     while (client.connected()) {
-
+      multiplexarDisplay(); // Mantener encendido el display sin congelar mientras atiende peticiones
       if (client.available()) {
-
         char c = client.read();
-
         requestHeader += c;
 
         if (c == '\n') {
-
           if (currentLine.length() == 0) {
 
-            // INICIAR SESIÓN CON USUARIO REGISTRADO
-            if (
-              requestHeader.indexOf(
-                "GET /login-user"
-              ) >= 0
-            ) {
+            if (requestHeader.indexOf("GET /login-user") >= 0) {
+              int idxUser = requestHeader.indexOf("user=") + 5;
+              int endUser = requestHeader.indexOf("&", idxUser);
+              int idxPass = requestHeader.indexOf("pass=") + 5;
+              int endPass = requestHeader.indexOf(" ", idxPass);
 
-              int idxUser =
-                  requestHeader.indexOf("user=") + 5;
+              String user = (idxUser > 4 && endUser > 0) ? urlDecode(requestHeader.substring(idxUser, endUser)) : "";
+              String pass = (idxPass > 4 && endPass > 0) ? urlDecode(requestHeader.substring(idxPass, endPass)) : "";
 
-              int endUser =
-                  requestHeader.indexOf("&", idxUser);
+              user.trim(); pass.trim();
 
-              int idxPass =
-                  requestHeader.indexOf("pass=") + 5;
-
-              int endPass =
-                  requestHeader.indexOf(" ", idxPass);
-
-              String user =
-                  (idxUser > 4 && endUser > 0)
-                  ? urlDecode(
-                      requestHeader.substring(
-                        idxUser,
-                        endUser
-                      )
-                    )
-                  : "";
-
-              String pass =
-                  (idxPass > 4 && endPass > 0)
-                  ? urlDecode(
-                      requestHeader.substring(
-                        idxPass,
-                        endPass
-                      )
-                    )
-                  : "";
-
-              user.trim();
-              pass.trim();
-
-              preferences.begin(
-                "users",
-                true
-              );
-
-              String storedPass =
-                  preferences.getString(
-                    user.c_str(),
-                    ""
-                  );
-
+              preferences.begin("users", true);
+              String storedPass = preferences.getString(user.c_str(), "");
               preferences.end();
 
-              if (
-                storedPass != "" &&
-                storedPass == pass
-              ) {
-
-                client.println(
-                  "HTTP/1.1 200 OK\r\n"
-                  "Content-Type: text/plain\r\n"
-                  "\r\n"
-                  "OK"
-                );
-
+              if (storedPass != "" && storedPass == pass) {
+                client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
               } else {
-
-                client.println(
-                  "HTTP/1.1 200 OK\r\n"
-                  "Content-Type: text/plain\r\n"
-                  "\r\n"
-                  "FAIL"
-                );
+                client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nFAIL");
               }
             }
+            else if (requestHeader.indexOf("GET /register-user") >= 0) {
+              int idxKey = requestHeader.indexOf("key=") + 4;
+              int endKey = requestHeader.indexOf("&", idxKey);
+              int idxUser = requestHeader.indexOf("user=") + 5;
+              int endUser = requestHeader.indexOf("&", idxUser);
+              int idxPass = requestHeader.indexOf("pass=") + 5;
+              int endPass = requestHeader.indexOf(" ", idxPass);
 
-            // REGISTRO DE NUEVO USUARIO
-            // (REQUIERE 'taller')
-            else if (
-              requestHeader.indexOf(
-                "GET /register-user"
-              ) >= 0
-            ) {
+              String key = (idxKey > 3 && endKey > 0) ? urlDecode(requestHeader.substring(idxKey, endKey)) : "";
+              String user = (idxUser > 4 && endUser > 0) ? urlDecode(requestHeader.substring(idxUser, endUser)) : "";
+              String pass = (idxPass > 4 && endPass > 0) ? urlDecode(requestHeader.substring(idxPass, endPass)) : "";
 
-              int idxKey =
-                  requestHeader.indexOf("key=") + 4;
+              key.trim(); user.trim(); pass.trim();
 
-              int endKey =
-                  requestHeader.indexOf("&", idxKey);
+              if (key.equalsIgnoreCase("taller")) {
+                preferences.begin("users", false);
+                String existingPass = preferences.getString(user.c_str(), "");
 
-              int idxUser =
-                  requestHeader.indexOf("user=") + 5;
-
-              int endUser =
-                  requestHeader.indexOf("&", idxUser);
-
-              int idxPass =
-                  requestHeader.indexOf("pass=") + 5;
-
-              int endPass =
-                  requestHeader.indexOf(" ", idxPass);
-
-              String key =
-                  (idxKey > 3 && endKey > 0)
-                  ? urlDecode(
-                      requestHeader.substring(
-                        idxKey,
-                        endKey
-                      )
-                    )
-                  : "";
-
-              String user =
-                  (idxUser > 4 && endUser > 0)
-                  ? urlDecode(
-                      requestHeader.substring(
-                        idxUser,
-                        endUser
-                      )
-                    )
-                  : "";
-
-              String pass =
-                  (idxPass > 4 && endPass > 0)
-                  ? urlDecode(
-                      requestHeader.substring(
-                        idxPass,
-                        endPass
-                      )
-                    )
-                  : "";
-
-              key.trim();
-              user.trim();
-              pass.trim();
-
-              if (
-                key.equalsIgnoreCase("taller")
-              ) {
-
-                preferences.begin(
-                  "users",
-                  false
-                );
-
-                String existingPass =
-                    preferences.getString(
-                      user.c_str(),
-                      ""
-                    );
-
-                if (
-                  existingPass == "" ||
-                  existingPass == pass
-                ) {
-
-                  preferences.putString(
-                    user.c_str(),
-                    pass
-                  );
-
+                if (existingPass == "" || existingPass == pass) {
+                  preferences.putString(user.c_str(), pass);
                   preferences.end();
-
-                  client.println(
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "\r\n"
-                    "OK"
-                  );
-
+                  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK");
                 } else {
-
                   preferences.end();
-
-                  client.println(
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "\r\n"
-                    "USER_EXISTS"
-                  );
+                  client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nUSER_EXISTS");
                 }
-
               } else {
-
-                client.println(
-                  "HTTP/1.1 200 OK\r\n"
-                  "Content-Type: text/plain\r\n"
-                  "\r\n"
-                  "WRONG_KEY"
-                );
+                client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nWRONG_KEY");
               }
             }
-
-            // RUTA DE ESTADO DE LA RED
-            else if (
-              requestHeader.indexOf(
-                "GET /get-status"
-              ) >= 0
-            ) {
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "{\"status\":\"ok\"}"
-              );
+            else if (requestHeader.indexOf("GET /get-status") >= 0) {
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{\"status\":\"ok\"}");
             }
-
-            // NUEVO:
-            // OBTENER RED WI-FI ACTUAL
-            else if (
-              requestHeader.indexOf(
-                "GET /get-current-network"
-              ) >= 0
-            ) {
-
-              String currentSSID =
-                  WiFi.SSID();
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain; charset=UTF-8\r\n"
-                "\r\n" +
-                currentSSID
-              );
+            else if (requestHeader.indexOf("GET /get-current-network") >= 0) {
+              String currentSSID = WiFi.SSID();
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + currentSSID);
             }
-
-            // OBTENER LISTA DE REDES
-            else if (
-              requestHeader.indexOf(
-                "GET /get-networks"
-              ) >= 0
-            ) {
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n" +
-                getNetworkJSON()
-              );
+            else if (requestHeader.indexOf("GET /get-networks") >= 0) {
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + getNetworkJSON());
             }
+            else if (requestHeader.indexOf("GET /add-wifi?") >= 0) {
+              int idxSSID = requestHeader.indexOf("ssid=") + 5;
+              int endSSID = requestHeader.indexOf("&", idxSSID);
+              int idxPASS = requestHeader.indexOf("pass=") + 5;
+              int endPASS = requestHeader.indexOf(" ", idxPASS);
 
-            // AGREGAR NUEVA RED WI-FI
-            else if (
-              requestHeader.indexOf(
-                "GET /add-wifi?"
-              ) >= 0
-            ) {
+              String newSSID = urlDecode(requestHeader.substring(idxSSID, endSSID));
+              String newPASS = urlDecode(requestHeader.substring(idxPASS, endPASS));
 
-              int idxSSID =
-                  requestHeader.indexOf("ssid=") + 5;
-
-              int endSSID =
-                  requestHeader.indexOf("&", idxSSID);
-
-              int idxPASS =
-                  requestHeader.indexOf("pass=") + 5;
-
-              int endPASS =
-                  requestHeader.indexOf(" ", idxPASS);
-
-              String newSSID =
-                  urlDecode(
-                    requestHeader.substring(
-                      idxSSID,
-                      endSSID
-                    )
-                  );
-
-              String newPASS =
-                  urlDecode(
-                    requestHeader.substring(
-                      idxPASS,
-                      endPASS
-                    )
-                  );
-
-              saveNetwork(
-                newSSID,
-                newPASS
-              );
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+              saveNetwork(newSSID, newPASS);
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
-
-            // ELIMINAR RED WI-FI
-            else if (
-              requestHeader.indexOf(
-                "GET /del-wifi?"
-              ) >= 0
-            ) {
-
-              int idx =
-                  requestHeader.indexOf("id=") + 3;
-
-              int targetId =
-                  requestHeader.substring(
-                    idx,
-                    requestHeader.indexOf(" ", idx)
-                  ).toInt();
-
+            else if (requestHeader.indexOf("GET /del-wifi?") >= 0) {
+              int idx = requestHeader.indexOf("id=") + 3;
+              int targetId = requestHeader.substring(idx, requestHeader.indexOf(" ", idx)).toInt();
               removeNetwork(targetId);
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
+            else if (requestHeader.indexOf("GET /connect-wifi?") >= 0) {
+              int idx = requestHeader.indexOf("id=") + 3;
+              int targetId = requestHeader.substring(idx, requestHeader.indexOf(" ", idx)).toInt();
 
-            // CONECTAR A RED ESPECÍFICA
-            else if (
-              requestHeader.indexOf(
-                "GET /connect-wifi?"
-              ) >= 0
-            ) {
-
-              int idx =
-                  requestHeader.indexOf("id=") + 3;
-
-              int targetId =
-                  requestHeader.substring(
-                    idx,
-                    requestHeader.indexOf(" ", idx)
-                  ).toInt();
-
-              preferences.begin(
-                "wifi-list",
-                true
-              );
-
-              String s =
-                  preferences.getString(
-                    ("ssid_" + String(targetId)).c_str(),
-                    ""
-                  );
-
-              String p =
-                  preferences.getString(
-                    ("pass_" + String(targetId)).c_str(),
-                    ""
-                  );
-
+              preferences.begin("wifi-list", true);
+              String s = preferences.getString(("ssid_" + String(targetId)).c_str(), "");
+              String p = preferences.getString(("pass_" + String(targetId)).c_str(), "");
               preferences.end();
 
               if (s != "") {
-
                 removeNetwork(targetId);
+                std::vector<std::pair<String, String>> temp;
+                temp.push_back({s, p});
 
-                std::vector<
-                  std::pair<String, String>
-                > temp;
-
-                temp.push_back({
-                  s,
-                  p
-                });
-
-                int count =
-                    getNetworkCount();
-
-                preferences.begin(
-                  "wifi-list",
-                  true
-                );
-
+                int count = getNetworkCount();
+                preferences.begin("wifi-list", true);
                 for (int i = 0; i < count; i++) {
-
                   temp.push_back({
-
-                    preferences.getString(
-                      ("ssid_" + String(i)).c_str(),
-                      ""
-                    ),
-
-                    preferences.getString(
-                      ("pass_" + String(i)).c_str(),
-                      ""
-                    )
+                    preferences.getString(("ssid_" + String(i)).c_str(), ""),
+                    preferences.getString(("pass_" + String(i)).c_str(), "")
                   });
                 }
-
                 preferences.end();
 
-                preferences.begin(
-                  "wifi-list",
-                  false
-                );
-
+                preferences.begin("wifi-list", false);
                 preferences.clear();
+                preferences.putInt("count", temp.size());
 
-                preferences.putInt(
-                  "count",
-                  temp.size()
-                );
-
-                for (
-                  size_t i = 0;
-                  i < temp.size();
-                  i++
-                ) {
-
-                  preferences.putString(
-                    ("ssid_" + String(i)).c_str(),
-                    temp[i].first
-                  );
-
-                  preferences.putString(
-                    ("pass_" + String(i)).c_str(),
-                    temp[i].second
-                  );
+                for (size_t i = 0; i < temp.size(); i++) {
+                  preferences.putString(("ssid_" + String(i)).c_str(), temp[i].first);
+                  preferences.putString(("pass_" + String(i)).c_str(), temp[i].second);
                 }
-
                 preferences.end();
               }
 
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
-
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
               delay(1000);
-
               ESP.restart();
             }
-
-            else if (
-              requestHeader.indexOf(
-                "GET /set-timezone?offset="
-              ) >= 0
-            ) {
-
-              int idx =
-                  requestHeader.indexOf("offset=") + 7;
-
-              gmtOffset_sec =
-                  requestHeader.substring(
-                    idx,
-                    requestHeader.indexOf(" ", idx)
-                  ).toInt();
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+            else if (requestHeader.indexOf("GET /set-timezone?offset=") >= 0) {
+              int idx = requestHeader.indexOf("offset=") + 7;
+              gmtOffset_sec = requestHeader.substring(idx, requestHeader.indexOf(" ", idx)).toInt();
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
-
-            else if (
-              requestHeader.indexOf(
-                "GET /get-time "
-              ) >= 0
-            ) {
-
+            else if (requestHeader.indexOf("GET /get-time ") >= 0) {
               DateTime ahora = ds3231.now();
-
               char hora[9];
-              snprintf(
-                hora,
-                sizeof(hora),
-                "%02d:%02d:%02d",
-                ahora.hour(),
-                ahora.minute(),
-                ahora.second()
-              );
+              snprintf(hora, sizeof(hora), "%02d:%02d:%02d", ahora.hour(), ahora.minute(), ahora.second());
 
               client.println("HTTP/1.1 200 OK");
               client.println("Content-Type: text/plain");
               client.println("Cache-Control: no-cache, no-store, must-revalidate");
               client.println("Pragma: no-cache");
               client.println("Expires: 0");
-              client.println("Connection: close");
-              client.println();
+              client.println("Connection: close\r\n");
               client.println(hora);
             }
-
-            else if (
-              requestHeader.indexOf(
-                "GET /set-time?epoch="
-              ) >= 0
-            ) {
-
-              int idx =
-                  requestHeader.indexOf("epoch=") + 6;
-
-              unsigned long epoch =
-                  requestHeader.substring(
-                    idx,
-                    requestHeader.indexOf(" ", idx)
-                  ).toInt();
-
-              unsigned long horaLocal =
-                epoch + gmtOffset_sec;
+            else if (requestHeader.indexOf("GET /set-time?epoch=") >= 0) {
+              int idx = requestHeader.indexOf("epoch=") + 6;
+              unsigned long epoch = requestHeader.substring(idx, requestHeader.indexOf(" ", idx)).toInt();
+              unsigned long horaLocal = epoch + gmtOffset_sec;
 
               rtc.setTime(horaLocal);
+              ds3231.adjust(DateTime(horaLocal));
 
-              // Guardar tambien la hora en el DS3231
-              ds3231.adjust(
-                DateTime(horaLocal)
-              );
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
-
             else if (requestHeader.indexOf("GET /get-timer ") >= 0) {
               actualizarTimer();
               uint32_t restante = obtenerTimerRestante();
@@ -2696,8 +1541,7 @@ void loop() {
               uint32_t ss = restante % 60UL;
 
               char display[12];
-              snprintf(display, sizeof(display), "%02lu:%02lu:%02lu",
-                       (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+              snprintf(display, sizeof(display), "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
 
               String json = "{\"horas\":" + String(hh) +
                             ",\"minutos\":" + String(mm) +
@@ -2707,7 +1551,6 @@ void loop() {
                             "\",\"display\":\"" + String(display) + "\"}";
               client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n" + json);
             }
-
             else if (requestHeader.indexOf("GET /timer-set?") >= 0) {
               int hidx = requestHeader.indexOf("h=") + 2;
               int midx = requestHeader.indexOf("m=") + 2;
@@ -2722,15 +1565,8 @@ void loop() {
               modoCronometro = true;
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
-
             else if (requestHeader.indexOf("GET /timer-start") >= 0) {
-              // Iniciar tambien recibe el tiempo de los campos de la pagina.
-              // Asi el usuario puede escribir minutos/segundos y pulsar INICIAR
-              // sin tener que configurar previamente.
-              int h = 0;
-              int m = 0;
-              int sec = 0;
-
+              int h = 0, m = 0, sec = 0;
               int hidx = requestHeader.indexOf("h=");
               int midx = requestHeader.indexOf("m=");
               int sidx = requestHeader.indexOf("s=");
@@ -2753,17 +1589,13 @@ void loop() {
                 sec = requestHeader.substring(sidx, end).toInt();
               }
 
-              h = constrain(h, 0, 99);
-              m = constrain(m, 0, 59);
-              sec = constrain(sec, 0, 59);
-
+              h = constrain(h, 0, 99); m = constrain(m, 0, 59); sec = constrain(sec, 0, 59);
               uint32_t nuevoTotal = (uint32_t)h * 3600UL + (uint32_t)m * 60UL + (uint32_t)sec;
               if (nuevoTotal > 0) {
                 timerTotalSegundos = nuevoTotal;
                 timerRestantesSegundos = nuevoTotal;
                 timerUltimoTick = millis();
                 timerCorriendo = true;
-                // Iniciar el cronometro activa exclusivamente este modo.
                 modoCronometro = true;
                 Serial.printf("Cronometro iniciado: %02d:%02d:%02d\n", h, m, sec);
               } else {
@@ -2774,93 +1606,45 @@ void loop() {
 
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
-
             else if (requestHeader.indexOf("GET /timer-pause") >= 0) {
               actualizarTimer();
               timerRestantesSegundos = obtenerTimerRestante();
               timerCorriendo = false;
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
-
             else if (requestHeader.indexOf("GET /timer-reset") >= 0) {
               timerRestantesSegundos = timerTotalSegundos;
               timerCorriendo = false;
               modoCronometro = true;
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
-
             else if (requestHeader.indexOf("GET /display-mode?mode=") >= 0) {
               int midx = requestHeader.indexOf("mode=") + 5;
               String mode = requestHeader.substring(midx, requestHeader.indexOf(" ", midx));
 
               if (mode.indexOf("timer") >= 0) {
-                // MODO CRONOMETRO: el reloj deja de ser el modo activo.
                 modoCronometro = true;
               } else {
-                // MODO RELOJ: detener completamente el cronometro para que
-                // ambos modos nunca funcionen al mismo tiempo.
                 modoCronometro = false;
                 timerCorriendo = false;
               }
 
               client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK");
             }
-
-            else if (
-              requestHeader.indexOf(
-                "GET /get-alarms"
-              ) >= 0
-            ) {
-
+            else if (requestHeader.indexOf("GET /get-alarms") >= 0) {
               String json = "[";
-
-              for (
-                size_t i = 0;
-                i < listaAlarmas.size();
-                i++
-              ) {
-
-                json +=
-                  "{\"id\":" +
-                  String(listaAlarmas[i].id) +
-                  ",\"hora\":" +
-                  String(listaAlarmas[i].hora) +
-                  ",\"minuto\":" +
-                  String(listaAlarmas[i].minuto) +
-                  "}";
-
-                if (
-                  i < listaAlarmas.size() - 1
-                ) {
-                  json += ",";
-                }
+              for (size_t i = 0; i < listaAlarmas.size(); i++) {
+                json += "{\"id\":" + String(listaAlarmas[i].id) +
+                        ",\"hora\":" + String(listaAlarmas[i].hora) +
+                        ",\"minuto\":" + String(listaAlarmas[i].minuto) + "}";
+                if (i < listaAlarmas.size() - 1) json += ",";
               }
-
               json += "]";
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: application/json\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n" +
-                json
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n" + json);
             }
-
-            else if (
-              requestHeader.indexOf(
-                "GET /add-alarm?time="
-              ) >= 0
-            ) {
-
-              int idx =
-                  requestHeader.indexOf("time=") + 5;
-
-              String timeStr =
-                  requestHeader.substring(
-                    idx,
-                    requestHeader.indexOf(" ", idx)
-                  );
+            else if (requestHeader.indexOf("GET /add-alarm?time=") >= 0) {
+              int idx = requestHeader.indexOf("time=") + 5;
+              String timeStr = requestHeader.substring(idx, requestHeader.indexOf(" ", idx));
 
               Alarma nueva = {
                 proximoId++,
@@ -2869,81 +1653,33 @@ void loop() {
                 true
               };
 
-              listaAlarmas.push_back(
-                nueva
-              );
-
-              // Guardar inmediatamente la nueva alarma en NVS.
+              listaAlarmas.push_back(nueva);
               guardarAlarmas();
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
+            else if (requestHeader.indexOf("GET /del-alarm?id=") >= 0) {
+              int idDel = requestHeader.substring(requestHeader.indexOf("id=") + 3).toInt();
 
-            else if (
-              requestHeader.indexOf(
-                "GET /del-alarm?id="
-              ) >= 0
-            ) {
-
-              int idDel =
-                  requestHeader.substring(
-                    requestHeader.indexOf("id=") + 3
-                  ).toInt();
-
-              for (
-                auto it = listaAlarmas.begin();
-                it != listaAlarmas.end();
-                ++it
-              ) {
-
+              for (auto it = listaAlarmas.begin(); it != listaAlarmas.end(); ++it) {
                 if (it->id == idDel) {
-
                   listaAlarmas.erase(it);
-
                   break;
                 }
               }
 
-              // Guardar tambien la eliminacion en NVS.
               guardarAlarmas();
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Access-Control-Allow-Origin: *\r\n"
-                "\r\n"
-                "OK"
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: *\r\n\r\nOK");
             }
-
             else {
-
-              client.println(
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html; charset=UTF-8\r\n"
-                "\r\n"
-              );
-
-              client.println(
-                index_html
-              );
+              client.println("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n");
+              client.println(index_html);
             }
 
             break;
-
           } else {
-
             currentLine = "";
           }
-
         } else if (c != '\r') {
-
           currentLine += c;
         }
       }
