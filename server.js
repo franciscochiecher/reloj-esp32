@@ -1,546 +1,112 @@
-const express = require("express");
+const express = require('express');
+const crypto = require('crypto');
 
 const app = express();
-
 const PORT = process.env.PORT || 10000;
+const WEB_PASSWORD = process.env.WEB_PASSWORD || 'cambiar-esta-clave';
+const DEVICE_TOKEN = process.env.DEVICE_TOKEN || 'CAMBIAR_DEVICE_TOKEN';
 
-// ============================================================
-// CONFIGURACIÓN
-// ============================================================
+app.use(express.json({limit: '32kb'}));
+app.use(express.static('public'));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// ============================================================
-// ESTADO DEL ESP32
-// ============================================================
-
-let espState = {
+let state = {
   online: false,
-  ip: null,
-  lastSeen: null,
-  data: {}
+  lastSeen: 0,
+  hora: '--:--:--',
+  timer: { horas: 0, minutos: 0, segundos: 0, corriendo: false },
+  modo: 'clock',
+  display: '00:00:00',
+  wifi: '',
+  alarms: []
 };
 
-// ============================================================
-// COLA DE COMANDOS PARA EL ESP32
-// ============================================================
+const commands = [];
+const sessions = new Map();
 
-let pendingCommands = [];
-
-// ============================================================
-// PÁGINA PRINCIPAL
-// ============================================================
-
-app.get("/", (req, res) => {
-  res.status(200).send(`
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Reloj ESP32</title>
-
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #111;
-      color: white;
-      text-align: center;
-      padding: 40px;
-    }
-
-    .card {
-      max-width: 600px;
-      margin: auto;
-      background: #222;
-      padding: 30px;
-      border-radius: 15px;
-    }
-
-    h1 {
-      color: #00ff99;
-    }
-
-    .online {
-      color: #00ff99;
-      font-weight: bold;
-    }
-
-    .offline {
-      color: #ff5555;
-      font-weight: bold;
-    }
-
-    pre {
-      text-align: left;
-      background: #000;
-      padding: 15px;
-      border-radius: 10px;
-      overflow-x: auto;
-    }
-  </style>
-</head>
-
-<body>
-
-<div class="card">
-
-  <h1>Reloj ESP32</h1>
-
-  <p>
-    Estado del ESP32:
-    <span id="estado">Comprobando...</span>
-  </p>
-
-  <p>
-    IP:
-    <span id="ip">-</span>
-  </p>
-
-  <p>
-    Última conexión:
-    <span id="lastSeen">-</span>
-  </p>
-
-  <h3>Datos recibidos</h3>
-
-  <pre id="datos">Cargando...</pre>
-
-</div>
-
-<script>
-
-async function actualizar() {
-
-  try {
-
-    const respuesta = await fetch("/state");
-
-    const datos = await respuesta.json();
-
-    const estado = document.getElementById("estado");
-    const ip = document.getElementById("ip");
-    const lastSeen = document.getElementById("lastSeen");
-    const datosElemento = document.getElementById("datos");
-
-    if (datos.online) {
-
-      estado.textContent = "ONLINE";
-      estado.className = "online";
-
-    } else {
-
-      estado.textContent = "OFFLINE";
-      estado.className = "offline";
-
-    }
-
-    ip.textContent = datos.ip || "-";
-
-    lastSeen.textContent = datos.lastSeen || "-";
-
-    datosElemento.textContent =
-      JSON.stringify(datos.data || {}, null, 2);
-
-  } catch (error) {
-
-    document.getElementById("estado").textContent = "ERROR";
-
+function cleanSessions() {
+  const now = Date.now();
+  for (const [token, expires] of sessions) {
+    if (expires < now) sessions.delete(token);
   }
-
 }
 
-actualizar();
-
-setInterval(actualizar, 2000);
-
-</script>
-
-</body>
-</html>
-  `);
-});
-
-// ============================================================
-// HEALTH CHECK
-// ============================================================
-
-app.get("/health", (req, res) => {
-
-  res.status(200).json({
-    ok: true,
-    server: "reloj-esp32-remoto",
-    time: new Date().toISOString()
-  });
-
-});
-
-// ============================================================
-// ESTADO DEL ESP32
-// ============================================================
-//
-// GET /state
-//
-// Este endpoint lo puede consultar la página web.
-//
-
-app.get("/state", (req, res) => {
-
-  res.status(200).json({
-    ok: true,
-    online: espState.online,
-    ip: espState.ip,
-    lastSeen: espState.lastSeen,
-    data: espState.data
-  });
-
-});
-
-// ============================================================
-// ESTADO ENVIADO POR EL ESP32
-// ============================================================
-//
-// POST /state
-//
-// El ESP32 manda aquí su estado.
-//
-
-app.post("/state", (req, res) => {
-
-  espState.online = true;
-
-  espState.ip =
-    req.body.ip ||
-    req.headers["x-forwarded-for"] ||
-    null;
-
-  espState.lastSeen =
-    new Date().toISOString();
-
-  espState.data =
-    req.body;
-
-  res.status(200).json({
-    ok: true
-  });
-
-});
-
-// ============================================================
-// COMPATIBILIDAD CON /update
-// ============================================================
-
-app.post("/update", (req, res) => {
-
-  espState.online = true;
-
-  espState.ip =
-    req.body.ip ||
-    req.headers["x-forwarded-for"] ||
-    null;
-
-  espState.lastSeen =
-    new Date().toISOString();
-
-  espState.data =
-    req.body;
-
-  res.status(200).json({
-    ok: true
-  });
-
-});
-
-// ============================================================
-// POLL DEL ESP32
-// ============================================================
-//
-// MUY IMPORTANTE:
-//
-// El ESP32 actual espera una respuesta de texto:
-//
-// timer_start|0|5|0
-//
-// timer_pause
-//
-// timer_reset
-//
-// display_mode|timer
-//
-// display_mode|clock
-//
-// set_time|XXXXXXXX
-//
-// add_alarm|12:30
-//
-// del_alarm|0
-//
-// Si no hay comandos:
-//
-// OK
-//
-// No devolvemos JSON aquí porque el código actual del ESP32
-// trabaja con comandos de texto.
-//
-
-app.get("/poll", (req, res) => {
-
-  espState.online = true;
-
-  espState.lastSeen =
-    new Date().toISOString();
-
-  if (pendingCommands.length > 0) {
-
-    const comando =
-      pendingCommands.shift();
-
-    console.log(
-      "Enviando comando al ESP32:",
-      comando
-    );
-
-    res
-      .status(200)
-      .type("text/plain")
-      .send(comando);
-
-    return;
+function requireWebAuth(req, res, next) {
+  cleanSessions();
+  const token = req.get('Authorization')?.replace(/^Bearer\s+/i, '');
+  if (!token || !sessions.has(token) || sessions.get(token) < Date.now()) {
+    return res.status(401).json({error: 'No autorizado'});
   }
+  next();
+}
 
-  res
-    .status(200)
-    .type("text/plain")
-    .send("OK");
-
-});
-
-// ============================================================
-// AGREGAR COMANDO
-// ============================================================
-//
-// POST /command
-//
-// Ejemplos:
-//
-// {
-//   "command": "timer_start|0|5|0"
-// }
-//
-// o:
-//
-// {
-//   "command": "timer_pause"
-// }
-//
-
-app.post("/command", (req, res) => {
-
-  let comando = null;
-
-  // ----------------------------------------------------------
-  // Si viene directamente como string
-  // ----------------------------------------------------------
-
-  if (typeof req.body === "string") {
-
-    comando = req.body.trim();
-
+function requireDevice(req, res, next) {
+  const token = req.get('X-Device-Token') || req.query.token;
+  if (!token || token !== DEVICE_TOKEN) {
+    return res.status(401).json({error: 'Dispositivo no autorizado'});
   }
+  next();
+}
 
-  // ----------------------------------------------------------
-  // Si viene como { command: "..." }
-// ----------------------------------------------------------
-
-  if (
-    !comando &&
-    typeof req.body.command === "string"
-  ) {
-
-    comando =
-      req.body.command.trim();
-
+app.post('/api/login', (req, res) => {
+  if (!req.body || req.body.password !== WEB_PASSWORD) {
+    return res.status(401).json({ok:false, error:'Clave incorrecta'});
   }
+  const token = crypto.randomBytes(24).toString('hex');
+  sessions.set(token, Date.now() + 24 * 60 * 60 * 1000);
+  res.json({ok:true, token});
+});
 
-  // ----------------------------------------------------------
-  // También aceptamos { type: "...", ... }
-// ----------------------------------------------------------
+app.get('/api/state', requireWebAuth, (req, res) => {
+  const copy = JSON.parse(JSON.stringify(state));
+  copy.online = Date.now() - state.lastSeen < 5000;
+  res.json(copy);
+});
 
-  if (!comando && req.body.type) {
+app.post('/api/command', requireWebAuth, (req, res) => {
+  const allowed = new Set(['timer_start','timer_pause','timer_reset','display_mode','set_time','add_alarm','del_alarm']);
+  const {type, args = {}} = req.body || {};
+  if (!allowed.has(type)) return res.status(400).json({error:'Comando no permitido'});
+  const id = crypto.randomBytes(8).toString('hex');
+  commands.push({id, type, args, created: Date.now()});
+  while (commands.length > 30) commands.shift();
+  res.json({ok:true, id});
+});
 
-    const tipo = req.body.type;
-
-    if (tipo === "timer_start") {
-
-      const h =
-        Number(req.body.hours || 0);
-
-      const m =
-        Number(req.body.minutes || 0);
-
-      const s =
-        Number(req.body.seconds || 0);
-
-      comando =
-        `timer_start|${h}|${m}|${s}`;
-
-    }
-
-    else if (tipo === "timer_pause") {
-
-      comando = "timer_pause";
-
-    }
-
-    else if (tipo === "timer_reset") {
-
-      comando = "timer_reset";
-
-    }
-
-    else if (tipo === "display_mode") {
-
-      const modo =
-        req.body.mode || "clock";
-
-      comando =
-        `display_mode|${modo}`;
-
-    }
-
-    else if (tipo === "set_time") {
-
-      const epoch =
-        Number(req.body.epoch || 0);
-
-      comando =
-        `set_time|${epoch}`;
-
-    }
-
-    else if (tipo === "add_alarm") {
-
-      const hora =
-        req.body.time || "";
-
-      comando =
-        `add_alarm|${hora}`;
-
-    }
-
-    else if (tipo === "del_alarm") {
-
-      const id =
-        Number(req.body.id || 0);
-
-      comando =
-        `del_alarm|${id}`;
-
-    }
-
+app.get('/api/device/poll', requireDevice, (req, res) => {
+  state.lastSeen = Date.now();
+  state.online = true;
+  const out = commands.splice(0, commands.length);
+  let text = '';
+  for (const c of out) {
+    const a = c.args || {};
+    if (c.type === 'timer_start') text += `timer_start|${Number(a.h)||0}|${Number(a.m)||0}|${Number(a.s)||0}\n`;
+    else if (c.type === 'timer_pause') text += 'timer_pause\n';
+    else if (c.type === 'timer_reset') text += 'timer_reset\n';
+    else if (c.type === 'display_mode') text += `display_mode|${a.mode === 'timer' ? 'timer' : 'clock'}\n`;
+    else if (c.type === 'set_time') text += `set_time|${Number(a.epoch)||0}\n`;
+    else if (c.type === 'add_alarm') text += `add_alarm|${String(a.time||'')}\n`;
+    else if (c.type === 'del_alarm') text += `del_alarm|${Number(a.id)||0}\n`;
   }
-
-  // ----------------------------------------------------------
-  // Validar comando
-  // ----------------------------------------------------------
-
-  if (!comando) {
-
-    res.status(400).json({
-      ok: false,
-      error: "No se recibió ningún comando válido"
-    });
-
-    return;
-  }
-
-  // ----------------------------------------------------------
-  // Agregar comando a la cola
-  // ----------------------------------------------------------
-
-  pendingCommands.push(comando);
-
-  console.log(
-    "Comando agregado:",
-    comando
-  );
-
-  res.status(200).json({
-    ok: true,
-    command: comando,
-    queue: pendingCommands.length
-  });
-
+  res.type('text/plain').send(text || 'NO_COMMANDS\n');
 });
 
-// ============================================================
-// VER COLA DE COMANDOS
-// ============================================================
-
-app.get("/commands", (req, res) => {
-
-  res.status(200).json({
-    ok: true,
-    queue: pendingCommands
-  });
-
+app.post('/api/device/state', requireDevice, (req, res) => {
+  const body = req.body || {};
+  state = {
+    online: true,
+    lastSeen: Date.now(),
+    hora: String(body.hora || '--:--:--'),
+    timer: body.timer || {horas:0,minutos:0,segundos:0,corriendo:false},
+    modo: body.modo === 'timer' ? 'timer' : 'clock',
+    display: String(body.display || '00:00:00'),
+    wifi: String(body.wifi || ''),
+    alarms: Array.isArray(body.alarms) ? body.alarms : []
+  };
+  res.json({ok:true});
 });
 
-// ============================================================
-// BORRAR COMANDOS PENDIENTES
-// ============================================================
+app.get('/health', (req,res) => res.json({ok:true, deviceOnline: Date.now()-state.lastSeen < 5000}));
 
-app.delete("/commands", (req, res) => {
-
-  pendingCommands = [];
-
-  res.status(200).json({
-    ok: true
-  });
-
-});
-
-// ============================================================
-// RUTA PARA EVITAR 404 CONFUSOS
-// ============================================================
-
-app.use((req, res) => {
-
-  res.status(404).json({
-    ok: false,
-    error: "Ruta no encontrada",
-    path: req.originalUrl,
-    method: req.method
-  });
-
-});
-
-// ============================================================
-// INICIAR SERVIDOR
-// ============================================================
-
-app.listen(PORT, "0.0.0.0", () => {
-
-  console.log("");
-  console.log("======================================");
-  console.log("   SERVIDOR RELOJ ESP32 INICIADO");
-  console.log("======================================");
-  console.log("");
-  console.log("Puerto:", PORT);
-  console.log("");
-  console.log("Rutas disponibles:");
-  console.log("GET  /");
-  console.log("GET  /health");
-  console.log("GET  /state");
-  console.log("POST /state");
-  console.log("POST /update");
-  console.log("GET  /poll");
-  console.log("POST /command");
-  console.log("GET  /commands");
-  console.log("DELETE /commands");
-  console.log("");
-  console.log("======================================");
-  console.log("");
-
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor escuchando en ${PORT}`);
 });
