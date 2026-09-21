@@ -1,4 +1,3 @@
-```js
 const express = require('express');
 const crypto = require('crypto');
 
@@ -103,4 +102,3 @@ async function sb(path, options = {}) {
 
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/${path}`_
-```
