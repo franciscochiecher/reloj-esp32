@@ -1,4 +1,3 @@
-
 const express = require('express');
 const crypto = require('crypto');
 
@@ -20,19 +19,8 @@ const SUPABASE_SERVICE_ROLE_KEY =
 
 const SUPABASE_TABLE = 'users';
 
-
-// ============================================================
-// MIDDLEWARE
-// ============================================================
-
 app.use(express.json({ limit: '32kb' }));
-
 app.use(express.static('public'));
-
-
-// ============================================================
-// ESTADO DEL ESP32
-// ============================================================
 
 let state = {
   online: false,
@@ -48,26 +36,12 @@ let state = {
   },
 
   modo: 'clock',
-
   display: '00:00:00',
-
   wifi: '',
-
   alarms: []
 };
 
-
-// ============================================================
-// COMANDOS PENDIENTES PARA EL ESP32
-// ============================================================
-
 const commands = [];
-
-
-// ============================================================
-// SESIONES WEB
-// ============================================================
-
 const sessions = new Map();
 
 
@@ -78,13 +52,8 @@ const sessions = new Map();
 function sbHeaders(extra = {}) {
   return {
     apikey: SUPABASE_SERVICE_ROLE_KEY,
-
-    Authorization:
-      `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-
-    'Content-Type':
-      'application/json',
-
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
     ...extra
   };
 }
@@ -92,13 +61,8 @@ function sbHeaders(extra = {}) {
 
 async function sb(path, options = {}) {
 
-  if (
-    !SUPABASE_URL ||
-    !SUPABASE_SERVICE_ROLE_KEY
-  ) {
-    throw new Error(
-      'Supabase no configurado en Render'
-    );
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error('Supabase no configurado en Render');
   }
 
   const response = await fetch(
@@ -140,19 +104,18 @@ async function sb(path, options = {}) {
             `HTTP ${response.status}`
           );
 
-    const error =
-      new Error(
-        `Supabase HTTP ${response.status}: ${detail}`
-      );
-
-    error.status = response.status;
-
-    throw error;
+    throw new Error(
+      `Supabase HTTP ${response.status}: ${detail}`
+    );
   }
 
   return data;
 }
 
+
+// ============================================================
+// USUARIOS
+// ============================================================
 
 async function findUser(username) {
 
@@ -161,17 +124,18 @@ async function findUser(username) {
       String(username).toLowerCase()
     );
 
-  const data =
-    await sb(
-      `${SUPABASE_TABLE}?select=username,password&username=eq.${key}&limit=1`
-    );
+  const data = await sb(
+    `${SUPABASE_TABLE}?select=username,password&username=eq.${key}&limit=1`
+  );
 
-  return (
+  if (
     Array.isArray(data) &&
     data.length
-  )
-    ? data[0]
-    : null;
+  ) {
+    return data[0];
+  }
+
+  return null;
 }
 
 
@@ -180,14 +144,13 @@ async function createUser(
   passwordHash
 ) {
 
-  return await sb(
+  return sb(
     SUPABASE_TABLE,
     {
       method: 'POST',
 
       headers: {
-        Prefer:
-          'return=representation'
+        Prefer: 'return=representation'
       },
 
       body: JSON.stringify({
@@ -227,14 +190,12 @@ function cleanSessions() {
 function makeSession(username) {
 
   const token =
-    crypto
-      .randomBytes(32)
-      .toString('hex');
+    crypto.randomBytes(32).toString('hex');
 
   sessions.set(
     token,
     {
-      username,
+      username: username,
 
       expires:
         Date.now() +
@@ -277,17 +238,20 @@ function verifyPassword(
 
   try {
 
-    const [
-      saltHex,
-      hashHex
-    ] =
-      stored.split(':');
+    const parts =
+      String(stored).split(':');
+
+    if (
+      parts.length !== 2
+    ) {
+      return false;
+    }
 
     const hash =
       crypto.scryptSync(
         password,
         Buffer.from(
-          saltHex,
+          parts[0],
           'hex'
         ),
         64
@@ -295,13 +259,14 @@ function verifyPassword(
 
     const expected =
       Buffer.from(
-        hashHex,
+        parts[1],
         'hex'
       );
 
     return (
       hash.length ===
         expected.length &&
+
       crypto.timingSafeEqual(
         hash,
         expected
@@ -344,12 +309,9 @@ function requireWebAuth(
     session.expires < Date.now()
   ) {
 
-    return res
-      .status(401)
-      .json({
-        error:
-          'No autorizado'
-      });
+    return res.status(401).json({
+      error: 'No autorizado'
+    });
   }
 
   next();
@@ -357,7 +319,7 @@ function requireWebAuth(
 
 
 // ============================================================
-// AUTENTICACIÓN DEL ESP32
+// AUTENTICACIÓN ESP32
 // ============================================================
 
 function requireDevice(
@@ -375,16 +337,41 @@ function requireDevice(
     token !== DEVICE_TOKEN
   ) {
 
-    return res
-      .status(401)
-      .json({
-        error:
-          'Dispositivo no autorizado'
-      });
+    return res.status(401).json({
+      error:
+        'Dispositivo no autorizado'
+    });
   }
 
   next();
 }
+
+
+// ============================================================
+// HEALTH
+// ============================================================
+
+app.get(
+  '/health',
+  (req, res) => {
+
+    res.json({
+
+      ok: true,
+
+      deviceOnline:
+        Date.now() -
+        state.lastSeen <
+        5000,
+
+      database:
+        Boolean(
+          SUPABASE_URL &&
+          SUPABASE_SERVICE_ROLE_KEY
+        )
+    });
+  }
+);
 
 
 // ============================================================
@@ -418,13 +405,11 @@ app.post(
         REGISTRATION_KEY
       ) {
 
-        return res
-          .status(403)
-          .json({
-            ok: false,
-            error:
-              'Palabra de autorización incorrecta.'
-          });
+        return res.status(403).json({
+          ok: false,
+          error:
+            'Palabra de autorización incorrecta.'
+        });
       }
 
 
@@ -432,13 +417,11 @@ app.post(
         username.length < 3
       ) {
 
-        return res
-          .status(400)
-          .json({
-            ok: false,
-            error:
-              'El usuario debe tener al menos 3 caracteres.'
-          });
+        return res.status(400).json({
+          ok: false,
+          error:
+            'El usuario debe tener al menos 3 caracteres.'
+        });
       }
 
 
@@ -446,13 +429,11 @@ app.post(
         password.length < 4
       ) {
 
-        return res
-          .status(400)
-          .json({
-            ok: false,
-            error:
-              'La contraseña debe tener al menos 4 caracteres.'
-          });
+        return res.status(400).json({
+          ok: false,
+          error:
+            'La contraseña debe tener al menos 4 caracteres.'
+        });
       }
 
 
@@ -462,13 +443,11 @@ app.post(
         )
       ) {
 
-        return res
-          .status(400)
-          .json({
-            ok: false,
-            error:
-              'El usuario solo puede usar letras, números, punto, guion y guion bajo.'
-          });
+        return res.status(400).json({
+          ok: false,
+          error:
+            'El usuario solo puede usar letras, números, punto, guion y guion bajo.'
+        });
       }
 
 
@@ -480,42 +459,18 @@ app.post(
         await findUser(key)
       ) {
 
-        return res
-          .status(409)
-          .json({
-            ok: false,
-            error:
-              'Ese usuario ya existe.'
-          });
+        return res.status(409).json({
+          ok: false,
+          error:
+            'Ese usuario ya existe.'
+        });
       }
 
 
-      try {
-
-        await createUser(
-          key,
-          hashPassword(password)
-        );
-
-      } catch (e) {
-
-        const again =
-          await findUser(key)
-            .catch(() => null);
-
-        if (again) {
-
-          return res
-            .status(409)
-            .json({
-              ok: false,
-              error:
-                'Ese usuario ya existe.'
-            });
-        }
-
-        throw e;
-      }
+      await createUser(
+        key,
+        hashPassword(password)
+      );
 
 
       console.log(
@@ -524,7 +479,9 @@ app.post(
 
 
       return res.json({
+
         ok: true,
+
         token:
           makeSession(key)
       });
@@ -536,13 +493,13 @@ app.post(
         e.message
       );
 
-      return res
-        .status(500)
-        .json({
-          ok: false,
-          error:
-            'No se pudo guardar el usuario en Supabase.'
-        });
+      return res.status(500).json({
+
+        ok: false,
+
+        error:
+          'No se pudo guardar el usuario en Supabase.'
+      });
     }
   }
 );
@@ -565,4 +522,405 @@ app.post(
 
       const password =
         String(
-          req.bo
+          req.body?.password || ''
+        );
+
+
+      const user =
+        await findUser(username);
+
+
+      if (
+        !user ||
+        !verifyPassword(
+          password,
+          user.password
+        )
+      ) {
+
+        return res.status(401).json({
+
+          ok: false,
+
+          error:
+            'Usuario o contraseña incorrectos.'
+        });
+      }
+
+
+      console.log(
+        `Login correcto: ${user.username}`
+      );
+
+
+      return res.json({
+
+        ok: true,
+
+        token:
+          makeSession(
+            user.username
+          )
+      });
+
+    } catch (e) {
+
+      console.error(
+        'ERROR /api/login:',
+        e.message
+      );
+
+      return res.status(500).json({
+
+        ok: false,
+
+        error:
+          'No se pudo consultar la base de usuarios.'
+      });
+    }
+  }
+);
+
+
+// ============================================================
+// ESTADO PARA LA WEB
+// ============================================================
+
+app.get(
+  '/api/state',
+  requireWebAuth,
+  (req, res) => {
+
+    const copy =
+      JSON.parse(
+        JSON.stringify(state)
+      );
+
+    copy.online =
+      Date.now() -
+      state.lastSeen <
+      5000;
+
+    res.json(copy);
+  }
+);
+
+
+// ============================================================
+// COMANDOS DESDE LA WEB
+// ============================================================
+
+app.post(
+  '/api/command',
+  requireWebAuth,
+  (req, res) => {
+
+    const allowed =
+      new Set([
+        'timer_start',
+        'timer_pause',
+        'timer_reset',
+        'display_mode',
+        'set_time',
+        'add_alarm',
+        'del_alarm'
+      ]);
+
+
+    const {
+      type,
+      args = {}
+    } =
+      req.body || {};
+
+
+    if (
+      !allowed.has(type)
+    ) {
+
+      return res.status(400).json({
+
+        error:
+          'Comando no permitido'
+      });
+    }
+
+
+    const id =
+      crypto.randomBytes(8)
+        .toString('hex');
+
+
+    commands.push({
+
+      id,
+
+      type,
+
+      args,
+
+      created:
+        Date.now()
+    });
+
+
+    while (
+      commands.length > 30
+    ) {
+
+      commands.shift();
+    }
+
+
+    res.json({
+
+      ok: true,
+
+      id
+    });
+  }
+);
+
+
+// ============================================================
+// POLL DEL ESP32
+// ============================================================
+
+function handleDevicePoll(
+  req,
+  res
+) {
+
+  state.lastSeen =
+    Date.now();
+
+  state.online =
+    true;
+
+
+  const out =
+    commands.splice(
+      0,
+      commands.length
+    );
+
+
+  let text = '';
+
+
+  for (
+    const c of out
+  ) {
+
+    const a =
+      c.args || {};
+
+
+    if (
+      c.type ===
+      'timer_start'
+    ) {
+
+      text +=
+        `timer_start|${Number(a.h) || 0}|${Number(a.m) || 0}|${Number(a.s) || 0}\n`;
+
+    } else if (
+      c.type ===
+      'timer_pause'
+    ) {
+
+      text +=
+        'timer_pause\n';
+
+    } else if (
+      c.type ===
+      'timer_reset'
+    ) {
+
+      text +=
+        'timer_reset\n';
+
+    } else if (
+      c.type ===
+      'display_mode'
+    ) {
+
+      text +=
+        `display_mode|${
+          a.mode === 'timer'
+            ? 'timer'
+            : 'clock'
+        }\n`;
+
+    } else if (
+      c.type ===
+      'set_time'
+    ) {
+
+      text +=
+        `set_time|${Number(a.epoch) || 0}\n`;
+
+    } else if (
+      c.type ===
+      'add_alarm'
+    ) {
+
+      text +=
+        `add_alarm|${String(
+          a.time || ''
+        )}\n`;
+
+    } else if (
+      c.type ===
+      'del_alarm'
+    ) {
+
+      text +=
+        `del_alarm|${Number(a.id) || 0}\n`;
+    }
+  }
+
+
+  res
+    .type('text/plain')
+    .send(
+      text ||
+      'NO_COMMANDS\n'
+    );
+}
+
+
+// ============================================================
+// ESTADO ENVIADO POR ESP32
+// ============================================================
+
+function handleDeviceState(
+  req,
+  res
+) {
+
+  const body =
+    req.body || {};
+
+
+  state = {
+
+    online: true,
+
+    lastSeen:
+      Date.now(),
+
+    hora:
+      String(
+        body.hora ||
+        '--:--:--'
+      ),
+
+    timer:
+      body.timer ||
+      {
+        horas: 0,
+        minutos: 0,
+        segundos: 0,
+        corriendo: false
+      },
+
+    modo:
+      body.modo === 'timer'
+        ? 'timer'
+        : 'clock',
+
+    display:
+      String(
+        body.display ||
+        '00:00:00'
+      ),
+
+    wifi:
+      String(
+        body.wifi ||
+        ''
+      ),
+
+    alarms:
+      Array.isArray(
+        body.alarms
+      )
+        ? body.alarms
+        : []
+  };
+
+
+  res.json({
+    ok: true
+  });
+}
+
+
+// ============================================================
+// RUTAS ORIGINALES
+// ============================================================
+
+app.get(
+  '/api/device/poll',
+  requireDevice,
+  handleDevicePoll
+);
+
+
+app.post(
+  '/api/device/state',
+  requireDevice,
+  handleDeviceState
+);
+
+
+// ============================================================
+// RUTAS QUE USA TU ESP32 ACTUAL
+// ============================================================
+
+app.get(
+  '/poll',
+  requireDevice,
+  handleDevicePoll
+);
+
+
+app.post(
+  '/state',
+  requireDevice,
+  handleDeviceState
+);
+
+
+// ============================================================
+// INICIAR SERVIDOR
+// ============================================================
+
+app.listen(
+  PORT,
+  '0.0.0.0',
+  () => {
+
+    console.log(
+      `Servidor escuchando en ${PORT}`
+    );
+
+
+    if (
+      SUPABASE_URL &&
+      SUPABASE_SERVICE_ROLE_KEY
+    ) {
+
+      console.log(
+        'Supabase configurado correctamente.'
+      );
+
+    } else {
+
+      console.log(
+        'ADVERTENCIA: faltan variables de Supabase.'
+      );
+    }
+  }
+);
