@@ -1,926 +1,546 @@
-const express = require('express');
-const crypto = require('crypto');
+const express = require("express");
 
 const app = express();
 
 const PORT = process.env.PORT || 10000;
 
-const DEVICE_TOKEN =
-  process.env.DEVICE_TOKEN || 'CAMBIAR_DEVICE_TOKEN';
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
 
-const REGISTRATION_KEY =
-  process.env.REGISTRATION_KEY || 'taller';
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const SUPABASE_URL =
-  (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+// ============================================================
+// ESTADO DEL ESP32
+// ============================================================
 
-const SUPABASE_SERVICE_ROLE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-const SUPABASE_TABLE = 'users';
-
-app.use(express.json({ limit: '32kb' }));
-app.use(express.static('public'));
-
-let state = {
+let espState = {
   online: false,
-  lastSeen: 0,
-
-  hora: '--:--:--',
-
-  timer: {
-    horas: 0,
-    minutos: 0,
-    segundos: 0,
-    corriendo: false
-  },
-
-  modo: 'clock',
-  display: '00:00:00',
-  wifi: '',
-  alarms: []
+  ip: null,
+  lastSeen: null,
+  data: {}
 };
 
-const commands = [];
-const sessions = new Map();
-
-
 // ============================================================
-// SUPABASE
+// COLA DE COMANDOS PARA EL ESP32
 // ============================================================
 
-function sbHeaders(extra = {}) {
-  return {
-    apikey: SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-    'Content-Type': 'application/json',
-    ...extra
-  };
-}
+let pendingCommands = [];
 
+// ============================================================
+// PÁGINA PRINCIPAL
+// ============================================================
 
-async function sb(path, options = {}) {
+app.get("/", (req, res) => {
+  res.status(200).send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reloj ESP32</title>
 
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error('Supabase no configurado en Render');
-  }
-
-  const response = await fetch(
-    `${SUPABASE_URL}/rest/v1/${path}`,
-    {
-      ...options,
-
-      headers: sbHeaders(
-        options.headers || {}
-      )
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: white;
+      text-align: center;
+      padding: 40px;
     }
-  );
 
-  const text = await response.text();
-
-  let data = null;
-
-  try {
-    data = text
-      ? JSON.parse(text)
-      : null;
-  } catch {
-    data = text;
-  }
-
-  if (!response.ok) {
-
-    const detail =
-      typeof data === 'object' && data
-        ? (
-            data.message ||
-            data.hint ||
-            data.details ||
-            data.error ||
-            JSON.stringify(data)
-          )
-        : String(
-            data ||
-            `HTTP ${response.status}`
-          );
-
-    throw new Error(
-      `Supabase HTTP ${response.status}: ${detail}`
-    );
-  }
-
-  return data;
-}
-
-
-// ============================================================
-// USUARIOS
-// ============================================================
-
-async function findUser(username) {
-
-  const key =
-    encodeURIComponent(
-      String(username).toLowerCase()
-    );
-
-  const data = await sb(
-    `${SUPABASE_TABLE}?select=username,password&username=eq.${key}&limit=1`
-  );
-
-  if (
-    Array.isArray(data) &&
-    data.length
-  ) {
-    return data[0];
-  }
-
-  return null;
-}
-
-
-async function createUser(
-  username,
-  passwordHash
-) {
-
-  return sb(
-    SUPABASE_TABLE,
-    {
-      method: 'POST',
-
-      headers: {
-        Prefer: 'return=representation'
-      },
-
-      body: JSON.stringify({
-        username:
-          String(username).toLowerCase(),
-
-        password:
-          passwordHash
-      })
+    .card {
+      max-width: 600px;
+      margin: auto;
+      background: #222;
+      padding: 30px;
+      border-radius: 15px;
     }
-  );
-}
 
-
-// ============================================================
-// SESIONES
-// ============================================================
-
-function cleanSessions() {
-
-  const now = Date.now();
-
-  for (
-    const [token, info]
-    of sessions
-  ) {
-
-    if (
-      info.expires < now
-    ) {
-      sessions.delete(token);
+    h1 {
+      color: #00ff99;
     }
-  }
-}
 
-
-function makeSession(username) {
-
-  const token =
-    crypto.randomBytes(32).toString('hex');
-
-  sessions.set(
-    token,
-    {
-      username: username,
-
-      expires:
-        Date.now() +
-        24 * 60 * 60 * 1000
+    .online {
+      color: #00ff99;
+      font-weight: bold;
     }
-  );
 
-  return token;
-}
+    .offline {
+      color: #ff5555;
+      font-weight: bold;
+    }
 
+    pre {
+      text-align: left;
+      background: #000;
+      padding: 15px;
+      border-radius: 10px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
 
-// ============================================================
-// CONTRASEÑAS
-// ============================================================
+<body>
 
-function hashPassword(password) {
+<div class="card">
 
-  const salt =
-    crypto.randomBytes(16);
+  <h1>Reloj ESP32</h1>
 
-  const hash =
-    crypto.scryptSync(
-      password,
-      salt,
-      64
-    );
+  <p>
+    Estado del ESP32:
+    <span id="estado">Comprobando...</span>
+  </p>
 
-  return (
-    salt.toString('hex') +
-    ':' +
-    hash.toString('hex')
-  );
-}
+  <p>
+    IP:
+    <span id="ip">-</span>
+  </p>
 
+  <p>
+    Última conexión:
+    <span id="lastSeen">-</span>
+  </p>
 
-function verifyPassword(
-  password,
-  stored
-) {
+  <h3>Datos recibidos</h3>
+
+  <pre id="datos">Cargando...</pre>
+
+</div>
+
+<script>
+
+async function actualizar() {
 
   try {
 
-    const parts =
-      String(stored).split(':');
+    const respuesta = await fetch("/state");
 
-    if (
-      parts.length !== 2
-    ) {
-      return false;
+    const datos = await respuesta.json();
+
+    const estado = document.getElementById("estado");
+    const ip = document.getElementById("ip");
+    const lastSeen = document.getElementById("lastSeen");
+    const datosElemento = document.getElementById("datos");
+
+    if (datos.online) {
+
+      estado.textContent = "ONLINE";
+      estado.className = "online";
+
+    } else {
+
+      estado.textContent = "OFFLINE";
+      estado.className = "offline";
+
     }
 
-    const hash =
-      crypto.scryptSync(
-        password,
-        Buffer.from(
-          parts[0],
-          'hex'
-        ),
-        64
-      );
+    ip.textContent = datos.ip || "-";
 
-    const expected =
-      Buffer.from(
-        parts[1],
-        'hex'
-      );
+    lastSeen.textContent = datos.lastSeen || "-";
 
-    return (
-      hash.length ===
-        expected.length &&
+    datosElemento.textContent =
+      JSON.stringify(datos.data || {}, null, 2);
 
-      crypto.timingSafeEqual(
-        hash,
-        expected
-      )
-    );
+  } catch (error) {
 
-  } catch {
+    document.getElementById("estado").textContent = "ERROR";
 
-    return false;
   }
+
 }
 
+actualizar();
+
+setInterval(actualizar, 2000);
+
+</script>
+
+</body>
+</html>
+  `);
+});
 
 // ============================================================
-// AUTENTICACIÓN WEB
+// HEALTH CHECK
 // ============================================================
 
-function requireWebAuth(
-  req,
-  res,
-  next
-) {
+app.get("/health", (req, res) => {
 
-  cleanSessions();
+  res.status(200).json({
+    ok: true,
+    server: "reloj-esp32-remoto",
+    time: new Date().toISOString()
+  });
 
-  const token =
-    (
-      req.get('Authorization') ||
-      ''
-    ).replace(
-      /^Bearer\s+/i,
-      ''
-    );
-
-  const session =
-    sessions.get(token);
-
-  if (
-    !session ||
-    session.expires < Date.now()
-  ) {
-
-    return res.status(401).json({
-      error: 'No autorizado'
-    });
-  }
-
-  next();
-}
-
+});
 
 // ============================================================
-// AUTENTICACIÓN ESP32
+// ESTADO DEL ESP32
 // ============================================================
+//
+// GET /state
+//
+// Este endpoint lo puede consultar la página web.
+//
 
-function requireDevice(
-  req,
-  res,
-  next
-) {
+app.get("/state", (req, res) => {
 
-  const token =
-    req.get('X-Device-Token') ||
-    req.query.token;
+  res.status(200).json({
+    ok: true,
+    online: espState.online,
+    ip: espState.ip,
+    lastSeen: espState.lastSeen,
+    data: espState.data
+  });
 
-  if (
-    !token ||
-    token !== DEVICE_TOKEN
-  ) {
-
-    return res.status(401).json({
-      error:
-        'Dispositivo no autorizado'
-    });
-  }
-
-  next();
-}
-
+});
 
 // ============================================================
-// HEALTH
+// ESTADO ENVIADO POR EL ESP32
 // ============================================================
+//
+// POST /state
+//
+// El ESP32 manda aquí su estado.
+//
 
-app.get(
-  '/health',
-  (req, res) => {
+app.post("/state", (req, res) => {
 
-    res.json({
+  espState.online = true;
 
-      ok: true,
+  espState.ip =
+    req.body.ip ||
+    req.headers["x-forwarded-for"] ||
+    null;
 
-      deviceOnline:
-        Date.now() -
-        state.lastSeen <
-        5000,
+  espState.lastSeen =
+    new Date().toISOString();
 
-      database:
-        Boolean(
-          SUPABASE_URL &&
-          SUPABASE_SERVICE_ROLE_KEY
-        )
-    });
-  }
-);
+  espState.data =
+    req.body;
 
+  res.status(200).json({
+    ok: true
+  });
 
-// ============================================================
-// REGISTRO
-// ============================================================
-
-app.post(
-  '/api/register',
-  async (req, res) => {
-
-    try {
-
-      const username =
-        String(
-          req.body?.username || ''
-        ).trim();
-
-      const password =
-        String(
-          req.body?.password || ''
-        );
-
-      const registrationKey =
-        String(
-          req.body?.registrationKey || ''
-        );
-
-
-      if (
-        registrationKey !==
-        REGISTRATION_KEY
-      ) {
-
-        return res.status(403).json({
-          ok: false,
-          error:
-            'Palabra de autorización incorrecta.'
-        });
-      }
-
-
-      if (
-        username.length < 3
-      ) {
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            'El usuario debe tener al menos 3 caracteres.'
-        });
-      }
-
-
-      if (
-        password.length < 4
-      ) {
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            'La contraseña debe tener al menos 4 caracteres.'
-        });
-      }
-
-
-      if (
-        !/^[a-zA-Z0-9_.-]+$/.test(
-          username
-        )
-      ) {
-
-        return res.status(400).json({
-          ok: false,
-          error:
-            'El usuario solo puede usar letras, números, punto, guion y guion bajo.'
-        });
-      }
-
-
-      const key =
-        username.toLowerCase();
-
-
-      if (
-        await findUser(key)
-      ) {
-
-        return res.status(409).json({
-          ok: false,
-          error:
-            'Ese usuario ya existe.'
-        });
-      }
-
-
-      await createUser(
-        key,
-        hashPassword(password)
-      );
-
-
-      console.log(
-        `Usuario guardado en Supabase: ${key}`
-      );
-
-
-      return res.json({
-
-        ok: true,
-
-        token:
-          makeSession(key)
-      });
-
-    } catch (e) {
-
-      console.error(
-        'ERROR /api/register:',
-        e.message
-      );
-
-      return res.status(500).json({
-
-        ok: false,
-
-        error:
-          'No se pudo guardar el usuario en Supabase.'
-      });
-    }
-  }
-);
-
+});
 
 // ============================================================
-// LOGIN
+// COMPATIBILIDAD CON /update
 // ============================================================
 
-app.post(
-  '/api/login',
-  async (req, res) => {
+app.post("/update", (req, res) => {
 
-    try {
+  espState.online = true;
 
-      const username =
-        String(
-          req.body?.username || ''
-        ).trim();
+  espState.ip =
+    req.body.ip ||
+    req.headers["x-forwarded-for"] ||
+    null;
 
-      const password =
-        String(
-          req.body?.password || ''
-        );
+  espState.lastSeen =
+    new Date().toISOString();
 
+  espState.data =
+    req.body;
 
-      const user =
-        await findUser(username);
+  res.status(200).json({
+    ok: true
+  });
 
-
-      if (
-        !user ||
-        !verifyPassword(
-          password,
-          user.password
-        )
-      ) {
-
-        return res.status(401).json({
-
-          ok: false,
-
-          error:
-            'Usuario o contraseña incorrectos.'
-        });
-      }
-
-
-      console.log(
-        `Login correcto: ${user.username}`
-      );
-
-
-      return res.json({
-
-        ok: true,
-
-        token:
-          makeSession(
-            user.username
-          )
-      });
-
-    } catch (e) {
-
-      console.error(
-        'ERROR /api/login:',
-        e.message
-      );
-
-      return res.status(500).json({
-
-        ok: false,
-
-        error:
-          'No se pudo consultar la base de usuarios.'
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// ESTADO PARA LA WEB
-// ============================================================
-
-app.get(
-  '/api/state',
-  requireWebAuth,
-  (req, res) => {
-
-    const copy =
-      JSON.parse(
-        JSON.stringify(state)
-      );
-
-    copy.online =
-      Date.now() -
-      state.lastSeen <
-      5000;
-
-    res.json(copy);
-  }
-);
-
-
-// ============================================================
-// COMANDOS DESDE LA WEB
-// ============================================================
-
-app.post(
-  '/api/command',
-  requireWebAuth,
-  (req, res) => {
-
-    const allowed =
-      new Set([
-        'timer_start',
-        'timer_pause',
-        'timer_reset',
-        'display_mode',
-        'set_time',
-        'add_alarm',
-        'del_alarm'
-      ]);
-
-
-    const {
-      type,
-      args = {}
-    } =
-      req.body || {};
-
-
-    if (
-      !allowed.has(type)
-    ) {
-
-      return res.status(400).json({
-
-        error:
-          'Comando no permitido'
-      });
-    }
-
-
-    const id =
-      crypto.randomBytes(8)
-        .toString('hex');
-
-
-    commands.push({
-
-      id,
-
-      type,
-
-      args,
-
-      created:
-        Date.now()
-    });
-
-
-    while (
-      commands.length > 30
-    ) {
-
-      commands.shift();
-    }
-
-
-    res.json({
-
-      ok: true,
-
-      id
-    });
-  }
-);
-
+});
 
 // ============================================================
 // POLL DEL ESP32
 // ============================================================
+//
+// MUY IMPORTANTE:
+//
+// El ESP32 actual espera una respuesta de texto:
+//
+// timer_start|0|5|0
+//
+// timer_pause
+//
+// timer_reset
+//
+// display_mode|timer
+//
+// display_mode|clock
+//
+// set_time|XXXXXXXX
+//
+// add_alarm|12:30
+//
+// del_alarm|0
+//
+// Si no hay comandos:
+//
+// OK
+//
+// No devolvemos JSON aquí porque el código actual del ESP32
+// trabaja con comandos de texto.
+//
 
-function handleDevicePoll(
-  req,
-  res
-) {
+app.get("/poll", (req, res) => {
 
-  state.lastSeen =
-    Date.now();
+  espState.online = true;
 
-  state.online =
-    true;
+  espState.lastSeen =
+    new Date().toISOString();
 
+  if (pendingCommands.length > 0) {
 
-  const out =
-    commands.splice(
-      0,
-      commands.length
+    const comando =
+      pendingCommands.shift();
+
+    console.log(
+      "Enviando comando al ESP32:",
+      comando
     );
 
+    res
+      .status(200)
+      .type("text/plain")
+      .send(comando);
 
-  let text = '';
-
-
-  for (
-    const c of out
-  ) {
-
-    const a =
-      c.args || {};
-
-
-    if (
-      c.type ===
-      'timer_start'
-    ) {
-
-      text +=
-        `timer_start|${Number(a.h) || 0}|${Number(a.m) || 0}|${Number(a.s) || 0}\n`;
-
-    } else if (
-      c.type ===
-      'timer_pause'
-    ) {
-
-      text +=
-        'timer_pause\n';
-
-    } else if (
-      c.type ===
-      'timer_reset'
-    ) {
-
-      text +=
-        'timer_reset\n';
-
-    } else if (
-      c.type ===
-      'display_mode'
-    ) {
-
-      text +=
-        `display_mode|${
-          a.mode === 'timer'
-            ? 'timer'
-            : 'clock'
-        }\n`;
-
-    } else if (
-      c.type ===
-      'set_time'
-    ) {
-
-      text +=
-        `set_time|${Number(a.epoch) || 0}\n`;
-
-    } else if (
-      c.type ===
-      'add_alarm'
-    ) {
-
-      text +=
-        `add_alarm|${String(
-          a.time || ''
-        )}\n`;
-
-    } else if (
-      c.type ===
-      'del_alarm'
-    ) {
-
-      text +=
-        `del_alarm|${Number(a.id) || 0}\n`;
-    }
+    return;
   }
 
-
   res
-    .type('text/plain')
-    .send(
-      text ||
-      'NO_COMMANDS\n'
-    );
-}
+    .status(200)
+    .type("text/plain")
+    .send("OK");
 
+});
 
 // ============================================================
-// ESTADO ENVIADO POR ESP32
+// AGREGAR COMANDO
+// ============================================================
+//
+// POST /command
+//
+// Ejemplos:
+//
+// {
+//   "command": "timer_start|0|5|0"
+// }
+//
+// o:
+//
+// {
+//   "command": "timer_pause"
+// }
+//
+
+app.post("/command", (req, res) => {
+
+  let comando = null;
+
+  // ----------------------------------------------------------
+  // Si viene directamente como string
+  // ----------------------------------------------------------
+
+  if (typeof req.body === "string") {
+
+    comando = req.body.trim();
+
+  }
+
+  // ----------------------------------------------------------
+  // Si viene como { command: "..." }
+// ----------------------------------------------------------
+
+  if (
+    !comando &&
+    typeof req.body.command === "string"
+  ) {
+
+    comando =
+      req.body.command.trim();
+
+  }
+
+  // ----------------------------------------------------------
+  // También aceptamos { type: "...", ... }
+// ----------------------------------------------------------
+
+  if (!comando && req.body.type) {
+
+    const tipo = req.body.type;
+
+    if (tipo === "timer_start") {
+
+      const h =
+        Number(req.body.hours || 0);
+
+      const m =
+        Number(req.body.minutes || 0);
+
+      const s =
+        Number(req.body.seconds || 0);
+
+      comando =
+        `timer_start|${h}|${m}|${s}`;
+
+    }
+
+    else if (tipo === "timer_pause") {
+
+      comando = "timer_pause";
+
+    }
+
+    else if (tipo === "timer_reset") {
+
+      comando = "timer_reset";
+
+    }
+
+    else if (tipo === "display_mode") {
+
+      const modo =
+        req.body.mode || "clock";
+
+      comando =
+        `display_mode|${modo}`;
+
+    }
+
+    else if (tipo === "set_time") {
+
+      const epoch =
+        Number(req.body.epoch || 0);
+
+      comando =
+        `set_time|${epoch}`;
+
+    }
+
+    else if (tipo === "add_alarm") {
+
+      const hora =
+        req.body.time || "";
+
+      comando =
+        `add_alarm|${hora}`;
+
+    }
+
+    else if (tipo === "del_alarm") {
+
+      const id =
+        Number(req.body.id || 0);
+
+      comando =
+        `del_alarm|${id}`;
+
+    }
+
+  }
+
+  // ----------------------------------------------------------
+  // Validar comando
+  // ----------------------------------------------------------
+
+  if (!comando) {
+
+    res.status(400).json({
+      ok: false,
+      error: "No se recibió ningún comando válido"
+    });
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // Agregar comando a la cola
+  // ----------------------------------------------------------
+
+  pendingCommands.push(comando);
+
+  console.log(
+    "Comando agregado:",
+    comando
+  );
+
+  res.status(200).json({
+    ok: true,
+    command: comando,
+    queue: pendingCommands.length
+  });
+
+});
+
+// ============================================================
+// VER COLA DE COMANDOS
 // ============================================================
 
-function handleDeviceState(
-  req,
-  res
-) {
+app.get("/commands", (req, res) => {
 
-  const body =
-    req.body || {};
+  res.status(200).json({
+    ok: true,
+    queue: pendingCommands
+  });
 
+});
 
-  state = {
+// ============================================================
+// BORRAR COMANDOS PENDIENTES
+// ============================================================
 
-    online: true,
+app.delete("/commands", (req, res) => {
 
-    lastSeen:
-      Date.now(),
+  pendingCommands = [];
 
-    hora:
-      String(
-        body.hora ||
-        '--:--:--'
-      ),
-
-    timer:
-      body.timer ||
-      {
-        horas: 0,
-        minutos: 0,
-        segundos: 0,
-        corriendo: false
-      },
-
-    modo:
-      body.modo === 'timer'
-        ? 'timer'
-        : 'clock',
-
-    display:
-      String(
-        body.display ||
-        '00:00:00'
-      ),
-
-    wifi:
-      String(
-        body.wifi ||
-        ''
-      ),
-
-    alarms:
-      Array.isArray(
-        body.alarms
-      )
-        ? body.alarms
-        : []
-  };
-
-
-  res.json({
+  res.status(200).json({
     ok: true
   });
-}
 
-
-// ============================================================
-// RUTAS ORIGINALES
-// ============================================================
-
-app.get(
-  '/api/device/poll',
-  requireDevice,
-  handleDevicePoll
-);
-
-
-app.post(
-  '/api/device/state',
-  requireDevice,
-  handleDeviceState
-);
-
+});
 
 // ============================================================
-// RUTAS QUE USA TU ESP32 ACTUAL
+// RUTA PARA EVITAR 404 CONFUSOS
 // ============================================================
 
-app.get(
-  '/poll',
-  requireDevice,
-  handleDevicePoll
-);
+app.use((req, res) => {
 
+  res.status(404).json({
+    ok: false,
+    error: "Ruta no encontrada",
+    path: req.originalUrl,
+    method: req.method
+  });
 
-app.post(
-  '/state',
-  requireDevice,
-  handleDeviceState
-);
-
+});
 
 // ============================================================
 // INICIAR SERVIDOR
 // ============================================================
 
-app.listen(
-  PORT,
-  '0.0.0.0',
-  () => {
+app.listen(PORT, "0.0.0.0", () => {
 
-    console.log(
-      `Servidor escuchando en ${PORT}`
-    );
+  console.log("");
+  console.log("======================================");
+  console.log("   SERVIDOR RELOJ ESP32 INICIADO");
+  console.log("======================================");
+  console.log("");
+  console.log("Puerto:", PORT);
+  console.log("");
+  console.log("Rutas disponibles:");
+  console.log("GET  /");
+  console.log("GET  /health");
+  console.log("GET  /state");
+  console.log("POST /state");
+  console.log("POST /update");
+  console.log("GET  /poll");
+  console.log("POST /command");
+  console.log("GET  /commands");
+  console.log("DELETE /commands");
+  console.log("");
+  console.log("======================================");
+  console.log("");
 
-
-    if (
-      SUPABASE_URL &&
-      SUPABASE_SERVICE_ROLE_KEY
-    ) {
-
-      console.log(
-        'Supabase configurado correctamente.'
-      );
-
-    } else {
-
-      console.log(
-        'ADVERTENCIA: faltan variables de Supabase.'
-      );
-    }
-  }
-);
+});
